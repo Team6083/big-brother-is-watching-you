@@ -1,6 +1,6 @@
 import { discordOwners, withDiscordOwners, withDiscordAssigner } from './owners.js';
 import { withTaskDescription } from './description.js';
-import { isTaskThread, isBoundTeamTask } from './scope.js';
+import { isTaskThread } from './scope.js';
 const snowflake=id=>/^\d{17,20}$/.test(id || '');
 const cardId=id=>/^[a-f0-9]{24}$/i.test(id || '');
 const sameMembers=(a,b)=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
@@ -26,7 +26,7 @@ export class TaskService {
     if(!row || row.status!=='succeeded')throw new Error('task_not_synced');
     let id;try{id=JSON.parse(row.ack).trello_card_id;}catch{}
     if(!cardId(id))throw new Error('task_not_synced');
-    if(thread.parentId!==this.config.forumId && !await isBoundTeamTask(this.store.db,this.config.guildId,thread.parentId,thread.id,id))throw new Error('task_not_synced');
+    if(thread.parentId!==this.config.forumId && (row.guild_id!==this.config.guildId || row.forum_id!==thread.parentId))throw new Error('task_not_synced');
     const [board,card]=await Promise.all([this.trello.board(),this.trello.card(id)]);
     if(board.closed || card.closed || card.id!==id || card.idBoard!==board.id ||
         !new RegExp(`(?:^|\\n)CMSFTC_THREAD_ID\\s*=\\s*${thread.id}(?:\\s|$)`).test(card.desc || ''))throw new Error('task_card_mismatch');
@@ -95,8 +95,8 @@ export class TaskService {
     try {
       // Recheck authorization after acquiring the durable card reservation.
       card=await this.context(thread,actor);await this.authorize(kind,actor,card);
-      if(kind==='owners'){payload.desc=withDiscordOwners(card.desc,discordOwners(payload.desc));(await this.store.db.prepare('UPDATE task_changes SET payload=? WHERE interaction_id=?').run(JSON.stringify(payload),id));}
-      if(kind==='description'){payload.desc=withTaskDescription(card.desc,input.text);(await this.store.db.prepare('UPDATE task_changes SET payload=? WHERE interaction_id=?').run(JSON.stringify(payload),id));}
+      if(kind==='owners'){payload.desc=withDiscordOwners(card.desc,discordOwners(payload.desc));await this.store.savePayload(id,payload);}
+      if(kind==='description'){payload.desc=withTaskDescription(card.desc,input.text);await this.store.savePayload(id,payload);}
       if(kind==='status'){const lists=await this.trello.lists();if(!lists.some(l=>l.id===payload.idList && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');}
       if(kind==='edit') {
         const lists=await this.trello.lists();
@@ -104,7 +104,7 @@ export class TaskService {
         const person=id=>({id,name:String(input.names?.[id] || id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
         payload.desc=withDiscordAssigner(withDiscordOwners(card.desc,[...new Set(input.ids)].map(person)),person(input.assigner));
         if(input.description!==undefined)payload.desc=withTaskDescription(payload.desc,input.description);
-        (await this.store.db.prepare('UPDATE task_changes SET payload=? WHERE interaction_id=?').run(JSON.stringify(payload),id));
+        await this.store.savePayload(id,payload);
       }
       if(kind==='dates' || kind==='edit') {
         const start=payload.start===undefined?card.start:payload.start;

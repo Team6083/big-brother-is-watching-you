@@ -4,7 +4,7 @@ import {
 } from 'discord.js';
 import { discordOwners, discordAssigner } from './owners.js';
 import { taskDescription } from './description.js';
-import {PostgresTaskStore} from '../state/tasks.js';
+import {MongoTaskStore} from '../state/tasks.js';
 import { TaskStore } from './store.js';
 import { taskConfig, trelloTasks } from './trello.js';
 import { TaskService } from './service.js';
@@ -139,7 +139,7 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
   const policy=taskConfig();
   if(!policy.enabled)return;
   if(!policy.mode)throw new Error('task_missing_management_policy');
-  const trello=trelloTasks(policy), store=proposalStore.db.postgres?new PostgresTaskStore(proposalStore.db):new TaskStore(proposalStore.db);
+  const trello=trelloTasks(policy), store=proposalStore.db.mongo?new MongoTaskStore(proposalStore.db):new TaskStore(proposalStore.db);
   const service=new TaskService({store,proposalStore,trello,config,policy});
   let active=0;
   const drafts=new Map();

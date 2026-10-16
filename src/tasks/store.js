@@ -24,6 +24,7 @@ export class TaskStore {
   }
   finish(id,result) { this.db.prepare("UPDATE task_changes SET state='succeeded',result=? WHERE interaction_id=?").run(JSON.stringify(result),id); }
   fail(id) { this.db.prepare("UPDATE task_changes SET state='failed' WHERE interaction_id=?").run(id); }
+  savePayload(id,payload) {this.db.prepare('UPDATE task_changes SET payload=? WHERE interaction_id=?').run(JSON.stringify(payload),id);}
 }
 
 export function mappedDiscordOwners(db,guild,trelloIds) {

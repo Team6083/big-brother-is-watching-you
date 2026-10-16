@@ -5,8 +5,6 @@ export function isTaskThread(thread,config) {
     (thread.parentId===config.forumId || teamChannelIds.includes(thread.parentId));
 }
 
-export async function isBoundTeamTask(db,guild,parent,thread,card) {
-  if(!teamChannelIds.includes(parent) || !(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'").get()))return false;
-  const row=(await db.prepare("SELECT ack FROM proposals WHERE thread_id=? AND guild_id=? AND forum_id=? AND status='succeeded'").get(thread,guild,parent));
-  try{return JSON.parse(row?.ack).trello_card_id===card;}catch{return false;}
+export async function isBoundTeamTask(store,guild,parent,thread,card) {
+  return teamChannelIds.includes(parent) && await store.isBoundTask(guild,parent,thread,card);
 }

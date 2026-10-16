@@ -1,49 +1,51 @@
-import pg from 'pg';
-import { readFile } from 'node:fs/promises';
+import {MongoClient} from 'mongodb';
 
-// Millisecond timestamps fit safely within JS integers. Discord IDs remain TEXT.
-pg.types.setTypeParser(20,value=>Number(value));
+export const collections=['proposals','forum_recovery','task_members','task_changes','meetings','meeting_records','meeting_dates','pm_deliveries'];
+const transactionOptions={readConcern:{level:'snapshot'},writeConcern:{w:'majority'},readPreference:'primary',maxCommitTimeMS:5000,timeoutMS:15000};
 
-export class PostgresDatabase {
-  constructor(client) {this.client=client;this.postgres=true;}
-  prepare(sql) {
-    let index=0;
-    let text=sql.replace(/\?/g,()=>'$'+(++index));
-    if(/^INSERT OR IGNORE /i.test(text))text=text.replace(/^INSERT OR IGNORE /i,'INSERT ')+(text.includes('ON CONFLICT')?'':' ON CONFLICT DO NOTHING');
-    text=text.replace(/SELECT name FROM sqlite_master WHERE type='table' AND name='([a-z_]+)'/g,
-      "SELECT table_name AS name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='$1'");
-    const query=(values)=>this.client.query(text,values);
-    return {
-      get:async(...values)=>(await query(values)).rows[0],
-      all:async(...values)=>(await query(values)).rows,
-      run:async(...values)=>{const result=await query(values);return {changes:result.rowCount??result.affectedRows??0};},
-    };
+export class MongoDatabase {
+  constructor(client,name) {this.client=client;this.database=client.db(name);this.mongo=true;}
+  collection(name) {
+    if(!collections.includes(name))throw new Error('invalid_collection');
+    return this.database.collection(name);
   }
-  async exec(sql) {return this.client.exec?this.client.exec(sql):this.client.query(sql);}
-  async close() {await this.client.end?.();}
+  async transaction(callback) {
+    const session=this.client.startSession();
+    try {return await session.withTransaction(()=>callback(session),transactionOptions);}
+    finally {await session.endSession();}
+  }
+  async check() {
+    const hello=await this.database.command({hello:1});
+    if(!hello.setName && hello.msg!=='isdbgrid')throw new Error('mongodb_replica_set_required');
+    for(const [name,index] of [['proposals','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_']]) {
+      const indexes=await this.collection(name).listIndexes().toArray(),found=indexes.find(i=>i.name===index);
+      if(!found || (index!=='_id_'&&!found.unique) || index==='task_one_pending'&&found.partialFilterExpression?.state!=='pending')throw new Error('mongodb_indexes_missing');
+    }
+  }
+  close() {return this.client.close();}
 }
 
 export async function openDatabase(env=process.env) {
-  let url;
-  try {url=new URL(env.DATABASE_URL);}catch{throw new Error('invalid_DATABASE_URL');}
-  if(!['postgres:','postgresql:'].includes(url.protocol))throw new Error('invalid_DATABASE_URL');
-  const pool=new pg.Pool({connectionString:env.DATABASE_URL,max:4,connectionTimeoutMillis:5000,
-    statement_timeout:10000,query_timeout:12000});
-  pool.on('error',()=>{console.error(JSON.stringify({event:'database_connection_failed'}));process.exitCode=1;});
-  try {await pool.query('SELECT 1');return new PostgresDatabase(pool);}
-  catch {await pool.end();throw new Error('database_unavailable');}
+  if(typeof env.MONGODB_URI!=='string' || !/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI) || !/^[a-zA-Z0-9_-]{1,63}$/.test(env.MONGODB_DB||''))throw new Error('invalid_mongodb_config');
+  let client;
+  try {
+    client=new MongoClient(env.MONGODB_URI,{maxPoolSize:8,serverSelectionTimeoutMS:5000,connectTimeoutMS:5000,socketTimeoutMS:15000,timeoutMS:10000,writeConcern:{w:'majority'}});
+    await client.connect();
+    const state=new MongoDatabase(client,env.MONGODB_DB);
+    await state.database.command({ping:1});
+    return state;
+  } catch {await client?.close().catch(()=>{});throw new Error('mongodb_unavailable');}
 }
 
 export async function migrate(db) {
-  await db.exec(await readFile(new URL('./schema.sql',import.meta.url),'utf8'));
-}
-
-export async function acquireProcessLock(db,identity,onLost=()=>{}) {
-  const client=await db.client.connect();
-  client.on('error',onLost);
-  try {
-    const result=await client.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS locked',[identity]);
-    if(!result.rows[0].locked)throw new Error('process_already_running');
-    return async()=>{try{await client.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[identity]);}finally{client.release();}};
-  } catch(error) {client.release();throw error;}
+  // The supplied database readWrite role can create these collections/indexes.
+  // No admin command, collection validator, TTL or destructive migration is used.
+  for(const name of collections) {
+    if(!(await db.database.listCollections({name},{nameOnly:true}).toArray()).length) {
+      try {await db.database.createCollection(name);}catch(error){if(error.code!==48)throw error;}
+    }
+  }
+  await db.collection('proposals').createIndex({guild_id:1,forum_id:1,next_attempt_at:1,received_at:1},{name:'proposals_due'});
+  await db.collection('task_members').createIndex({guild_id:1,trello_id:1},{name:'member_trello_unique',unique:true});
+  await db.collection('task_changes').createIndex({card_id:1},{name:'task_one_pending',unique:true,partialFilterExpression:{state:'pending'}});
 }

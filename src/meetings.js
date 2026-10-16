@@ -1,5 +1,5 @@
 import {dateOptions,dateControls,timeModal,selectedTimes,previewControls,recordControls,recordModal} from './meetings-ui.js';
-import {PostgresMeetingStore} from './state/meetings.js';
+import {MongoMeetingStore} from './state/meetings.js';
 import { Events, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
 
 export const meetingChannelId=process.env.MEETING_CHANNEL_ID || '';
@@ -101,6 +101,11 @@ export class MeetingStore {
   }
   record(channel,date) {return this.db.prepare('SELECT * FROM meeting_records WHERE channel_id=? AND meeting_date=?').get(channel,recordDate(date));}
   recordForMeeting(row) {return this.record(row.channel_id,new Date(row.starts_at+8*3600000).toISOString().slice(0,10));}
+  markMissed(row) {this.db.prepare("UPDATE meetings SET status='missed' WHERE channel_id=? AND starts_at=? AND status='pending'").run(row.channel_id,row.starts_at);}
+  verificationFailed(row) {this.db.prepare("UPDATE meetings SET attempts=attempts+1,status=CASE WHEN attempts>=4 THEN 'uncertain' ELSE 'pending' END WHERE channel_id=? AND starts_at=? AND status='pending'").run(row.channel_id,row.starts_at);}
+  claim(row) {return this.db.prepare("UPDATE meetings SET status='sending' WHERE channel_id=? AND starts_at=? AND status='pending' RETURNING *").get(row.channel_id,row.starts_at);}
+  markSent(row,id) {this.db.prepare("UPDATE meetings SET status='sent',message_id=? WHERE channel_id=? AND starts_at=? AND status='sending'").run(id,row.channel_id,row.starts_at);}
+  markUncertain(row) {this.db.prepare("UPDATE meetings SET status='uncertain' WHERE channel_id=? AND starts_at=? AND status='sending'").run(row.channel_id,row.starts_at);}
 }
 
 const display=ms=>new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',dateStyle:'full',timeStyle:'short',hour12:false}).format(new Date(ms));
@@ -118,20 +123,20 @@ export class MeetingReminder {
     try {
       const row=await this.store.get(meetingChannelId),now=this.now();
       if(!row || row.status!=='pending' || row.remind_at>now)return;
-      if(row.starts_at<=now) {(await this.store.db.prepare("UPDATE meetings SET status='missed' WHERE channel_id=?").run(row.channel_id));return;}
+      if(row.starts_at<=now) {await this.store.markMissed(row);return;}
       try {await this.verify();} catch {
-        (await this.store.db.prepare("UPDATE meetings SET attempts=attempts+1,status=CASE WHEN attempts>=4 THEN 'uncertain' ELSE 'pending' END WHERE channel_id=? AND starts_at=? AND status='pending'").run(row.channel_id,row.starts_at));
+        await this.store.verificationFailed(row);
         this.log('meeting_reminder_failed',{code:'permission_or_channel_check_failed'});return;
       }
-      const claimed=(await this.store.db.prepare("UPDATE meetings SET status='sending' WHERE channel_id=? AND starts_at=? AND status='pending' RETURNING *").get(row.channel_id,row.starts_at));
+      const claimed=await this.store.claim(row);
       if(!claimed)return;
       try {
         const record=await this.store.recordForMeeting(claimed);
         const message=await this.send({content:`【隊長會議提醒】\n<@&${captainRoleId}>\n會議時間：${meetingRange(claimed)}\n地點：${claimed.location || '尚未設定'}\n請記得出席並準備各組簡報。${record?'\n會議記錄：<'+record.url+'>':''}`,allowedMentions:{parse:[],roles:[captainRoleId],users:[],repliedUser:false}});
-        (await this.store.db.prepare("UPDATE meetings SET status='sent',message_id=? WHERE channel_id=? AND starts_at=? AND status='sending'").run(message.id,row.channel_id,row.starts_at));
+        await this.store.markSent(row,message.id);
         this.log('meeting_reminder_sent');
       } catch {
-        (await this.store.db.prepare("UPDATE meetings SET status='uncertain' WHERE channel_id=? AND starts_at=? AND status='sending'").run(row.channel_id,row.starts_at));
+        await this.store.markUncertain(row);
         this.log('meeting_reminder_failed',{code:'send_result_uncertain'});
       }
     } finally {this.running=false;}
@@ -140,7 +145,7 @@ export class MeetingReminder {
 
 export function registerMeetings(client,proposalStore,config,log) {
   if(!meetingChannelId || !captainRoleId)return {tick:async()=>{},get running(){return false;}};
-  const store=proposalStore.db.postgres?new PostgresMeetingStore(proposalStore.db):new MeetingStore(proposalStore.db);
+  const store=proposalStore.db.mongo?new MongoMeetingStore(proposalStore.db):new MeetingStore(proposalStore.db);
   async function verify() {
     const channel=await client.channels.fetch(meetingChannelId);
     if(channel?.guildId!==config.guildId || channel.type!==0)throw new Error('invalid_meeting_channel');
