@@ -22,6 +22,7 @@ node --import ./test/env.js --test --test-reporter=dot test/*.test.js
 - 提醒 receipt 原子 claim，相同到期階段不重複通知。
 - 僅有專用 DB `readWrite` 的帳號可以建 collection／索引、check 與執行 transaction；對 admin 的 usersInfo 指令被拒絕。
 - 健康檢查狀態與 HTTP 關閉、連線錯誤不洩漏帳密。
+- URI 路徑決定實際 database；認證來源可獨立指定。漏填名稱、`test`、非法名稱與無效連線字串都在連線前拒絕，錯誤不含帳密。
 
 Windows 上 mongod 首次啟動曾超過預設 10 秒，因此測試給予 60 秒啟動寬限。測試後會停止臨時程序並清理資料；不建立 Windows 服務或開機排程。
 

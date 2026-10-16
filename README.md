@@ -50,8 +50,7 @@ npm start
 | `DISCORD_BOT_TOKEN` | Bot Token，機密 |
 | `DISCORD_GUILD_ID`、`DISCORD_FORUM_CHANNEL_ID` | 指定伺服器與提案論壇 |
 | `MAKE_WEBHOOK_URL`、`MAKE_WEBHOOK_API_KEY` | 私密 Webhook 及選用驗證金鑰 |
-| `MONGODB_URI` | MongoDB 連線字串，機密；取代舊 `DATABASE_URL` |
-| `MONGODB_DB` | 該 Bot 專用的 database 名稱，必填 |
+| `MONGODB_URI` | MongoDB 連線字串，機密；路徑必須包含專用 database 名稱，取代舊 `DATABASE_URL` |
 | `DISCORD_NOTIFY` | 提案成功回覆，預設 true |
 | `TASK_CONTROLS_ENABLED` | 啟用 `/任務`，預設 false |
 | `TASK_MANAGEMENT_MODE` | `forum`：可查看論壇成員；`roles`：限定角色 |
@@ -65,7 +64,7 @@ npm start
 | `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 會議頻道及提及角色，兩者都提供才啟用 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
-URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。`MONGODB_DB` 明確指定本專案的 database，runtime 不會存取其他 database。`TASK_ALLOWED_CHANNEL_IDS` 僅供已綁定文字討論串任務的相容用途，預設留空，不會將一般聊天轉成任務。
+URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。資料庫名稱放在 URI 路徑，例如 `mongodb://localhost/botdb?replicaSet=rs0&authSource=admin`（僅為格式示例）。名稱限 1–63 個英數字、底線或連字號；省略名稱或使用 `test` 都會拒絕啟動，避免誤寫 driver 的預設資料庫。`authSource` 是獨立的認證來源，請依帳號設定；runtime 使用 URI 指定的 database。`TASK_ALLOWED_CHANNEL_IDS` 僅供已綁定文字討論串任務的相容用途，預設留空，不會將一般聊天轉成任務。
 
 ## Discord 與 Make
 

@@ -17,17 +17,19 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
   const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
   let db;
   t.after(async()=>{await db?.close();await replica.stop();});
-  const rootUri=replica.getUri().replace('mongodb://','mongodb://test_root:test-root-password@')+'&authSource=admin';
-  db=await openDatabase({MONGODB_URI:rootUri,MONGODB_DB:'bot_test'});
+  const rootUri=replica.getUri('bot_test').replace('mongodb://','mongodb://test_root:test-root-password@')+'&authSource=admin';
+  db=await openDatabase({MONGODB_URI:rootUri});
+  assert.equal(db.database.databaseName,'bot_test');
   assert.ok(db instanceof MongoDatabase);await migrate(db);await migrate(db);await db.check();
   const queue=new MongoStore(db),tasks=new MongoTaskStore(db),meetings=new MongoMeetingStore(db);
   const guild='900000000000000100',forum='900000000000000101',thread='900000000000000102',actor='900000000000000103';
   const config={guildId:guild,forumId:forum,notify:true};let now=Date.parse('2026-10-16T10:00:00Z');
   await t.test('database readWrite role can initialize, check and transact without admin privileges',async()=>{
     await db.client.db('limited_test').command({createUser:'test_app',pwd:'test-app-password',roles:[{role:'readWrite',db:'limited_test'}]});
-    const uri=replica.getUri().replace('mongodb://','mongodb://test_app:test-app-password@')+'&authSource=limited_test';
-    const limited=await openDatabase({MONGODB_URI:uri,MONGODB_DB:'limited_test'});
+    const uri=replica.getUri('limited_test').replace('mongodb://','mongodb://test_app:test-app-password@')+'&authSource=limited_test';
+    const limited=await openDatabase({MONGODB_URI:uri});
     try {
+      assert.equal(limited.database.databaseName,'limited_test');
       await migrate(limited);await limited.check();
       await new MongoMeetingStore(limited).set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:00');
       await assert.rejects(limited.client.db('admin').command({usersInfo:1}),error=>error.code===13);
@@ -106,4 +108,8 @@ test('health listener reports readiness and closes cleanly',async()=>{
   let ready=false;const health=await serveHealth({port:0,host:'127.0.0.1',ready:()=>ready,alive:()=>true});
   try {assert.equal((await fetch(`http://127.0.0.1:${health.port}/healthz`)).status,200);assert.equal((await fetch(`http://127.0.0.1:${health.port}/readyz`)).status,503);ready=true;assert.equal((await fetch(`http://127.0.0.1:${health.port}/readyz`)).status,200);}finally{await health.close();}
 });
-test('invalid MongoDB settings never expose credentials',async()=>{await assert.rejects(openDatabase({MONGODB_URI:'https://user:secret@example.org',MONGODB_DB:'test'}),{message:'invalid_mongodb_config'});});
+test('invalid MongoDB settings never expose credentials',async()=>{
+  for(const uri of [undefined,'https://user:secret@example.org','mongodb://user:secret@','mongodb://localhost/?replicaSet=rs0','mongodb://localhost/test','mongodb+srv://example.org/?authSource=admin','mongodb+srv://example.org/test','mongodb://localhost/bad%20name','mongodb://localhost/'+ 'a'.repeat(64)]) {
+    await assert.rejects(openDatabase({MONGODB_URI:uri}),{message:'invalid_mongodb_config'});
+  }
+});

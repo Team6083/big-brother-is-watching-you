@@ -4,7 +4,7 @@ export const collections=['proposals','forum_recovery','task_members','task_chan
 const transactionOptions={readConcern:{level:'snapshot'},writeConcern:{w:'majority'},readPreference:'primary',maxCommitTimeMS:5000,timeoutMS:15000};
 
 export class MongoDatabase {
-  constructor(client,name) {this.client=client;this.database=client.db(name);this.mongo=true;}
+  constructor(client) {this.client=client;this.database=client.db();this.mongo=true;}
   collection(name) {
     if(!collections.includes(name))throw new Error('invalid_collection');
     return this.database.collection(name);
@@ -26,12 +26,15 @@ export class MongoDatabase {
 }
 
 export async function openDatabase(env=process.env) {
-  if(typeof env.MONGODB_URI!=='string' || !/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI) || !/^[a-zA-Z0-9_-]{1,63}$/.test(env.MONGODB_DB||''))throw new Error('invalid_mongodb_config');
+  if(typeof env.MONGODB_URI!=='string' || !/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI))throw new Error('invalid_mongodb_config');
   let client;
   try {
     client=new MongoClient(env.MONGODB_URI,{maxPoolSize:8,serverSelectionTimeoutMS:5000,connectTimeoutMS:5000,socketTimeoutMS:15000,timeoutMS:10000,writeConcern:{w:'majority'}});
+    if(!/^[a-zA-Z0-9_-]{1,63}$/.test(client.options.dbName||'') || client.options.dbName==='test')throw new Error('invalid_mongodb_config');
+  } catch {await client?.close().catch(()=>{});throw new Error('invalid_mongodb_config');}
+  try {
     await client.connect();
-    const state=new MongoDatabase(client,env.MONGODB_DB);
+    const state=new MongoDatabase(client);
     await state.database.command({ping:1});
     return state;
   } catch {await client?.close().catch(()=>{});throw new Error('mongodb_unavailable');}

@@ -6,7 +6,7 @@
 |---|---|
 | Codebase | 同一 repo、同一入口 `npm start`，不同環境使用不同設定 |
 | Dependencies | 精確版本與 lockfile，npm ci，不用全域套件 |
-| Config | Token、Webhook、頻道／角色／看板、`MONGODB_URI`／`MONGODB_DB` 由 env 提供 |
+| Config | Token、Webhook、頻道／角色／看板、`MONGODB_URI` 由 env 提供 |
 | Backing services | MongoDB、Discord、Make、Trello 都是外部資源 |
 | Build/release/run | 安裝、注入設定、一次性建索引、執行分開；不自動開通服務 |
 | Processes | 無本機持久狀態；只有尚未提交、15 分鐘失效的 Discord 表單暫存記憶體 |
@@ -32,6 +32,8 @@
 - 狀態由 store 方法檢查並限定寫入值，不要求 collection validator。直接手動改 DB 不受此層驗證保護。
 
 ### 連線與權限
+
+只設定 `MONGODB_URI`，資料庫名稱必須放在 URI 路徑中；`client.db()` 使用 driver 解析的名稱。名稱限 1–63 個英數字、底線或連字號。省略名稱或明確使用 `test` 均以 `invalid_mongodb_config` 拒絕啟動；格式錯誤也使用此錯誤碼，連線／ping 失敗則為 `mongodb_unavailable`，不輸出原始 URI。`authSource` 獨立指定認證來源。舊設定需將 database 名稱移至 URI 路徑，並移除原本獨立的 database 環境變數。
 
 提供本專案獨立 database 的內建 `readWrite` role 即可，包含建 collection／索引與交易所需權限，不需 admin 或 dbAdmin。`npm run migrate` 是一次性建立 collection／索引，不會刪除或重建資料。`npm run check` 檢查 replica set 及必要唯一索引；runtime 啟動前也檢查。
 
