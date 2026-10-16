@@ -85,7 +85,7 @@ npm start
 
 ## 程序與交接
 
-詳見 [執行契約與 12-factor](docs/runtime.md)。本 repo 不包含 CI/CD、Dockerfile、Compose、k8s manifest 或伺服器設定。
+詳見 [執行契約與 12-factor](docs/runtime.md)。本 repo 提供 GitHub Actions CI（測試與 image build）及 Dockerfile；`main` 與 `v*` tag 會推送 `linux/amd64` image 到 `ghcr.io/team6083/big-brother-is-watching-you`。不包含 Compose、k8s manifest 或伺服器設定。PM 使用同一個 image，覆寫 command 為 `node src/pm/cli.js --mode alerts --send --watch`。
 
 - Bot：`node src/index.js`。
 - PM：`node src/pm/cli.js --mode alerts --send --watch`，獨立程序；直接使用 Trello 與 Discord，不走 Make。
