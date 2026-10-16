@@ -15,3 +15,6 @@ private/
 *.zip
 coverage/
 .DS_Store
+
+.cache/
+.mongodb-binaries/

@@ -1,62 +1,76 @@
 # 執行契約與 12-factor
 
-依據 [The Twelve-Factor App](https://12factor.net/) 整理。此文件描述應用程式需要的執行條件，部署、容器與 CI/CD 由團隊另外管理。
+依據 [The Twelve-Factor App](https://12factor.net/)。本分支將 Gateway Bot、會議與 PM 定時提醒合成同一個 Node.js 程序，正式狀態由外部 MongoDB replica set 保存。
 
-| 原則 | 此版本的做法 |
+| 原則 | 做法 |
 |---|---|
-| I. Codebase | 單一 repo，開發與正式環境共用程式、用不同設定 |
-| II. Dependencies | package.json 宣告並鎖定版本，npm ci 安裝，不依賴全域 npm 套件 |
-| III. Config | Token、Webhook、伺服器／頻道／角色／看板、資料庫均由 env 提供；範例留空 |
-| IV. Backing services | PostgreSQL、Discord、Make、Trello 是外部資源，可替換憑證與連線設定 |
-| V. Build/release/run | 安裝相依套件、注入 release 設定、執行程序分開；migrate 是一次性程序 |
-| VI. Processes | runtime 不保存本機持久狀態；佇列、去重、任務更新、會議、記錄與提醒狀態都在 PostgreSQL |
-| VII. Port binding | 指定 PORT 時開啟健康檢查 listener；Gateway 本身是對外連線，不需要對外 webhook port |
-| VIII. Concurrency | Bot 與 PM 各自為程序；資料庫租約／唯一鍵防重，程序鎖避免同一身分雙開 |
-| IX. Disposability | SIGTERM/SIGINT 排空工作、停止新事件，25 秒上限；重啟由持久狀態恢復 |
-| X. Dev/prod parity | 開發與正式使用同一 Node 主版本、lockfile 和 PostgreSQL；測試另含 PGlite 與舊 SQLite 回歸 |
-| XI. Logs | 受控事件／錯誤碼寫 stdout/stderr，不寫常駐日誌；不輸出原始例外、憑證或內容 |
-| XII. Admin processes | migrate、check、register、SQLite 匯入與 admin CLI 是使用相同程式的 one-off process |
+| Codebase | 同一 repo、同一入口 `npm start`，不同環境使用不同設定 |
+| Dependencies | 精確版本與 lockfile，npm ci，不用全域套件 |
+| Config | Token、Webhook、頻道／角色／看板、`MONGODB_URI` 由 env 提供 |
+| Backing services | MongoDB、Discord、Make、Trello 都是外部資源 |
+| Build/release/run | 安裝、注入設定、一次性建索引、執行分開；不自動開通服務 |
+| Processes | 無本機持久狀態；只有尚未提交、15 分鐘失效的 Discord 表單暫存記憶體 |
+| Port binding | 指定 PORT 時提供健康檢查，Gateway 使用出站連線 |
+| Concurrency | 主程序內獨立非同步工作；單文件租約與唯一索引防重；部署維持單副本 |
+| Disposability | SIGTERM／SIGINT 停止新工作、排空，25 秒上限；狀態供重啟恢復 |
+| Dev/prod parity | Node 24.x、相同 lockfile、相同主版本 MongoDB replica set；保留舊 SQLite 回歸測試 |
+| Logs | stdout／stderr 的受控事件，不記錄 URI、Token、內容或原始例外 |
+| Admin processes | migrate、check、register、admin、PM 預覽均為 one-off 指令 |
 
-## 必要資源
+## 資料庫
 
-- Node.js 24.21 以上的 24.x；請依 package-lock.json 安裝。
-- 外部 PostgreSQL，帳號與 schema 由管理員建立，`DATABASE_URL` 經私密設定注入。
-- 一次性 migration 帳號可建表；日常執行帳號只需這些表的讀寫權限。程式啟動不自行執行 DDL。
-- PostgreSQL pool 上限為每程序 4 條連線；程序鎖會占其中 1 條。
-- 出站 HTTPS/WSS：Discord Gateway/API、Make Webhook、Trello API；出站 PostgreSQL 至指定資料庫。Proxy／CA 設定由執行環境管理。
-- 不需要 runtime 可寫的專案目錄或持久磁碟。未儲存的 Discord 表單暫存在記憶體，15 分鐘到期、重啟後重開；它們不是正式狀態。
+使用官方 `mongodb` driver，不使用 Mongoose，也沒有 SQL 翻譯介面。`src/state/` 提供具名資料操作；runtime 不呼叫 `prepare(sql)`。
 
-## 程序鎖與擴展限制
+八個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`。
 
-同一個 Bot 連到同一個 guild，僅允許一個 Gateway 程序。鎖保存在 PostgreSQL session，程序失聯／關閉後釋放；失去該連線時 Bot 結束，避免繼續以失效鎖執行。PM 使用獨立鎖。資料庫連線不要經會破壞 session lock 的 transaction pooling；需要支援 session 的直連或 session pooling。
+- Discord ID 及卡片 ID 都是字串；毫秒 timestamp 是 JS 安全整數。
+- `_id` 保存 Thread ID、Interaction ID、delivery key 或由 channel／date 等欄位組成的識別碼。
+- proposals 以 `findOneAndUpdate` 原子取得租約；寫入必須持有相同 lease token。
+- 任務 pending 使用 partial unique index；同一張卡同時只能有一項待確認更新。
+- 會議設定／取消與日期歷史使用 transaction。callback 只含資料庫操作，可安全由 driver 重試，沒有 Discord／Trello 副作用。
+- 不設 TTL 刪除去重、會議或提醒歷史。
+- 狀態由 store 方法檢查並限定寫入值，不要求 collection validator。直接手動改 DB 不受此層驗證保護。
 
-此版本沒有實作 Discord sharding 或多副本 Gateway，也不應用增加 replicas 的方式擴展同一身分。擴展不同 Bot／guild 使用獨立設定與資料庫；PM 和 Gateway 可分開配置資源。狀態已外部化，但不代表所有角色可以任意水平擴展。
+### 連線與權限
 
-## 健康檢查與關閉
+只設定 `MONGODB_URI`，資料庫名稱必須放在 URI 路徑中；`client.db()` 使用 driver 解析的名稱。名稱限 1–63 個英數字、底線或連字號。省略名稱或明確使用 `test` 均以 `invalid_mongodb_config` 拒絕啟動；格式錯誤也使用此錯誤碼，連線／ping 失敗則為 `mongodb_unavailable`，不輸出原始 URI。`authSource` 獨立指定認證來源。舊設定需將 database 名稱移至 URI 路徑，並移除原本獨立的 database 環境變數。
 
-- `/healthz`：程序仍接受運作時回 200，停止中回 503。
-- `/readyz`：Discord 已 ready 且未停止時回 200；啟動中／斷線／停止中回 503。
-- 健康回覆只有固定狀態，不包含設定或憑證。此埠不是管理 API。
-- Bot 停止新事件及排程，等待同步、回覆與補抓完成；超過 25 秒強制結束。未完成工作由持久化租約或 uncertain 狀態保護。
-- Make 請求可能遇到「Trello 成功但回應遺失」，接收端去重仍是必要條件。
-- 發送會議通知前保存 sending；發送結果不明不重送。重啟時該頻道的 sending 改成 uncertain。
+提供本專案獨立 database 的內建 `readWrite` role 即可，包含建 collection／索引與交易所需權限，不需 admin 或 dbAdmin。`npm run migrate` 是一次性建立 collection／索引，不會刪除或重建資料。`npm run check` 檢查 replica set 及必要唯一索引；runtime 啟動前也檢查。
 
-## 公開內容界線
+連線池上限 8；server selection／connect timeout 5 秒、一般操作預算 10 秒、socket timeout 15 秒；會議 transaction 預算 15 秒。driver 自動重連，不再因程序鎖 session 消失而退出。外部 API 保留原有 timeout 與有限重試。
 
-不提交 `.env`、Token、Webhook 真實網址、帳號、私人頻道／角色 ID、看板與卡片實際 ID、會議記錄連結、SQLite 或資料庫匯出、日誌、截圖、帳號操作紀錄與個人電腦路徑。
+團隊版本尚待確認；本機整合測試預設 MongoDB 8.0.17，可以用 `MONGOMS_VERSION` 覆寫。這不是將正式 MongoDB 版本寫死在程式。
 
-測試的長數字及網址都是合成資料。`CMSFTC_*` 是舊卡片的資料標記名稱，保留來相容既有描述格式，並非部署 ID 或機密資料；不要為了更名而破壞既有卡片辨識。
+## 單一程序與部署要求
 
-## 團隊需進行的端對端驗收
+啟動 `npm start`，並以 `PM_ENABLED=true` 啟用同程序內的 PM。`PM_INTERVAL_MS` 預設 60000；掃描未完成時不重疊執行。停止時不再啟動下一輪，主關閉流程也會等待 PM。PM 共用資料庫連線，直接呼叫 Trello／Discord，不經 Make。
 
-1. 確認外部 PostgreSQL 的 TCP/TLS 連線與 migration 權限，日常帳號能執行 check。
-2. 在私人管道匯入舊狀態；核對 proposals、forum_recovery、meetings、meeting_records、meeting_dates、pm_deliveries 數量與狀態。
-3. 只有一個 Bot／PM 程序在線；重複啟動會被鎖拒絕。驗證資料庫斷線後不會同時有兩個持鎖程序。
-4. 新論壇文章建卡一次；重啟、Make 回應遺失與重連補抓不重複建卡。一般訊息和其他論壇不觸發。
-5. 任務設定／查看／狀態更新可用，沒有權限的成員被拒絕。
-6. 24h、1h、逾期提醒只在原討論串發一次；PM 重啟不重發。
-7. 會議日期、時間範圍、地點、角色提及及台灣時間 17:00 正確；記錄只能選已登錄日期，查詢為私人回覆。
-8. 發出 SIGTERM，檢查 readiness、停止時間及重啟後的持久狀態。關機／離線期間無法即時通知。
-9. 確認日誌不含連線字串、Token、Webhook、任務描述或會議連結。
+應用程式不再取得全域程序鎖。部署維護者須採單副本與 Recreate，並避免舊環境使用相同正式 Token 並存；不能以滾動部署或增加 replicas 擴展同一 Bot。本次不修改部署檔案。
 
-本 repo 不會替上述步驟啟用服務、建立部署設定或修改團隊伺服器。
+即使如此，節點失聯仍可能導致新舊程序短暫並存。單文件租約、唯一索引與原子提醒 claim 仍保留，但不能宣稱它們取代跨節點程序鎖或保證全域 exactly-once。團隊已接受移除程序鎖的風險。
+
+## 健康與停止
+
+- `/healthz`：運作時 200、停止中 503。
+- `/readyz`：Discord ready 且未停止時 200，其餘 503；回覆不含設定。
+- 停止接新 Discord 事件、清除定時工作、等待正在進行的工作，再關閉 Gateway、HTTP 與共享 MongoDB client。25 秒後強制結束，外部停止寬限需大於此值。
+- 程序中斷後租約可回收。會議 sending 在新程序啟動時改為 uncertain，不自動重送；PM 的 pending receipt 也不會自動重送。
+
+## 維護決策與公開內容
+
+本階段移除 PostgreSQL、程序鎖及 PostgreSQL 專用 SQLite 匯入工具；SQLite 實作保留供既有回歸測試，不擴大進行第二階段清理。舊資料檔及原本電腦上的 Bot 不會被修改，是否搬移舊狀態需在正式切換前確認。
+
+不提交真實 URI、帳號、部署 ID、Webhook、會議連結、資料庫檔、日誌、截圖或個人電腦路徑。測試數字、帳密與網址只用合成值。`CMSFTC_*` 僅為相容舊卡片的標記名稱。
+
+CI 維護者可另加 mongod binary 快取；既有 Dockerfile、workflow 本次保持不動。Dockerfile 原本的獨立 PM 指令旁註已不再適用，請勿另啟 PM daemon。
+
+## 人工驗收
+
+1. 確認正式 MongoDB 主版本、replica set、TLS 及該 DB 的 readWrite role；執行 migrate／check。
+2. 決定是否需要舊狀態，保留備份並停止舊 Bot／PM，再由部署負責人切換；本分支不自動搬移或捨棄。
+3. 只有一個 npm start 程序，PM_ENABLED=true。確認部署是單副本 Recreate，而不是期待程式鎖擋重複啟動。
+4. 新文章建卡一次、Make 回應遺失不重複建卡；重啟補抓只涵蓋新啟用後文章。
+5. 任務設定、查看、狀態、Owner／Assignee 與日期正確，未授權頻道／成員被拒絕。
+6. 24h／1h／逾期與會議提醒僅發一次；記錄只能選已有會議日期。
+7. 發 SIGTERM，確認 Gateway 與 PM 一起停止、排空及重啟後狀態；不殘留第二個 PM worker。
+8. 資料庫斷線／恢復時不洩漏憑證，亦不因未確認結果重發訊息。

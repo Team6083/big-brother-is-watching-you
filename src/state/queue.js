@@ -1,38 +1,45 @@
 import {randomUUID} from 'node:crypto';
 import {openDatabase} from './database.js';
 
-export class PostgresStore {
-  constructor(db) {this.db=db;}
+export class MongoStore {
+  constructor(db) {this.db=db;this.rows=db.collection('proposals');}
   async enqueue(id,config,now=Date.now()) {
-    return (await this.db.prepare('INSERT INTO proposals(thread_id,guild_id,forum_id,received_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING').run(id,config.guildId,config.forumId,now)).changes===1;
+    if(![id,config.guildId,config.forumId].every(v=>/^\d{17,20}$/.test(v)))throw new Error('invalid_proposal_identity');
+    try {
+      await this.rows.insertOne({_id:id,thread_id:id,guild_id:config.guildId,forum_id:config.forumId,status:'pending',payload:null,task_snapshot:null,ack:null,
+        fetch_attempts:0,send_attempts:0,next_attempt_at:0,lease_until:0,lease_token:null,last_error:null,received_at:now,confirmed_at:null,
+        notification_status:'pending',notification_attempts:0,notification_message_id:null,notification_error:null});return true;
+    }catch(error){if(error.code===11000)return false;throw error;}
   }
-  get(id) {return this.db.prepare('SELECT * FROM proposals WHERE thread_id=?').get(id);}
-  list() {return this.db.prepare(`SELECT thread_id,status,fetch_attempts,send_attempts,last_error,notification_status,notification_error
-    FROM proposals ORDER BY received_at DESC LIMIT 100`).all();}
-  claim(config,now=Date.now()) {
-    return this.db.prepare(`UPDATE proposals SET lease_until=?,lease_token=? WHERE thread_id=(
-      SELECT thread_id FROM proposals WHERE guild_id=? AND forum_id=? AND lease_until<=? AND next_attempt_at<=?
-      AND (status IN ('pending','awaiting_confirmation') OR (status='succeeded' AND notification_status='pending'))
-      ORDER BY next_attempt_at,received_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`)
-      .get(now+120000,randomUUID(),config.guildId,config.forumId,now,now);
+  async get(id) {return await this.rows.findOne({_id:id})??undefined;}
+  list() {return this.rows.find({},{projection:{_id:0,thread_id:1,status:1,fetch_attempts:1,send_attempts:1,last_error:1,notification_status:1,notification_error:1}}).sort({received_at:-1}).limit(100).toArray();}
+  async claim(config,now=Date.now()) {
+    return await this.rows.findOneAndUpdate({guild_id:config.guildId,forum_id:config.forumId,lease_until:{$lte:now},next_attempt_at:{$lte:now},
+      $or:[{status:{$in:['pending','awaiting_confirmation']}},{status:'succeeded',notification_status:'pending'}]},
+      {$set:{lease_until:now+120000,lease_token:randomUUID()}},{sort:{next_attempt_at:1,received_at:1},returnDocument:'after',includeResultMetadata:false})??undefined;
   }
   async update(row,fields) {
     const allowed=new Set(['status','payload','task_snapshot','ack','fetch_attempts','send_attempts','next_attempt_at','last_error','confirmed_at','notification_status','notification_attempts','notification_message_id','notification_error']);
-    const keys=Object.keys(fields);
-    if(!keys.length || keys.some(key=>!allowed.has(key)))throw new Error('invalid_store_update');
-    const result=await this.db.prepare(`UPDATE proposals SET ${keys.map(k=>k+'=?').join(',')} WHERE thread_id=? AND lease_token=?`)
-      .run(...keys.map(k=>fields[k]),row.thread_id,row.lease_token);
-    if(result.changes!==1)throw new Error('lease_lost');
+    if(!Object.keys(fields).length || Object.keys(fields).some(k=>!allowed.has(k)) || 'status' in fields&&!['pending','awaiting_confirmation','succeeded','failed'].includes(fields.status) ||
+      'notification_status' in fields&&!['pending','sent','failed','skipped'].includes(fields.notification_status))throw new Error('invalid_store_update');
+    const result=await this.rows.updateOne({_id:row.thread_id,lease_token:row.lease_token},{$set:fields});
+    if(result.matchedCount!==1)throw new Error('lease_lost');
     Object.assign(row,fields);
   }
-  release(row) {return this.db.prepare('UPDATE proposals SET lease_until=0,lease_token=NULL WHERE thread_id=? AND lease_token=?').run(row.thread_id,row.lease_token);}
+  release(row) {return this.rows.updateOne({_id:row.thread_id,lease_token:row.lease_token},{$set:{lease_until:0,lease_token:null}});}
   async retry(id,notification=false,now=Date.now()) {
-    const sql=notification?`UPDATE proposals SET notification_status='pending',notification_attempts=0,notification_error=NULL,next_attempt_at=0
-      WHERE thread_id=? AND lease_until<=? AND status='succeeded' AND notification_status IN ('failed','skipped')`:
-      `UPDATE proposals SET status=CASE WHEN payload IS NULL THEN 'pending' ELSE 'awaiting_confirmation' END,fetch_attempts=0,send_attempts=0,last_error=NULL,next_attempt_at=0
-      WHERE thread_id=? AND lease_until<=? AND status='failed'`;
-    return (await this.db.prepare(sql).run(id,now)).changes===1;
+    const row=await this.get(id);
+    if(!row || row.lease_until>now || (notification?row.status!=='succeeded'||!['failed','skipped'].includes(row.notification_status):row.status!=='failed'))return false;
+    const fields=notification?{notification_status:'pending',notification_attempts:0,notification_error:null,next_attempt_at:0}:
+      {status:row.payload===null?'pending':'awaiting_confirmation',fetch_attempts:0,send_attempts:0,last_error:null,next_attempt_at:0};
+    return (await this.rows.updateOne({_id:id,status:row.status,notification_status:row.notification_status,lease_until:{$lte:now}},{$set:fields})).modifiedCount===1;
   }
+  async initializeRecovery(config,now) {
+    try {await this.db.collection('forum_recovery').updateOne({_id:config.guildId+':'+config.forumId},{$setOnInsert:{guild_id:config.guildId,forum_id:config.forumId,started_at:now,scanned_at:now}},{upsert:true});}
+    catch(error){if(error.code!==11000)throw error;}
+  }
+  recoveryCheckpoint(config) {return this.db.collection('forum_recovery').findOne({_id:config.guildId+':'+config.forumId});}
+  advanceRecovery(config,until) {return this.db.collection('forum_recovery').updateOne({_id:config.guildId+':'+config.forumId},{$max:{scanned_at:until}});}
   close() {return this.db.close();}
 }
-export async function openStore(env=process.env) {return new PostgresStore(await openDatabase(env));}
+export async function openStore(env=process.env) {return new MongoStore(await openDatabase(env));}

@@ -31,21 +31,23 @@ export async function listRecoveryThreads(rest,config,since,until) {
 export class Recovery {
   constructor({store,config,scan,log,now=Date.now}) {
     Object.assign(this,{store,config,scan,log,now});this.running=false;this.lastAttempt=-Infinity;
-    if(store.db.postgres){this.ready=store.db.prepare('INSERT INTO forum_recovery VALUES(?,?,?,?) ON CONFLICT DO NOTHING').run(config.guildId,config.forumId,now(),now());return;}
-    store.db.exec('CREATE TABLE IF NOT EXISTS forum_recovery(guild_id TEXT NOT NULL,forum_id TEXT NOT NULL,started_at INTEGER NOT NULL,scanned_at INTEGER NOT NULL,PRIMARY KEY(guild_id,forum_id))');
-    const start=now();store.db.prepare('INSERT OR IGNORE INTO forum_recovery VALUES(?,?,?,?)').run(config.guildId,config.forumId,start,start);
+    this.startedAt=now();
+    if(!store.db.mongo)store.initializeRecovery(config,this.startedAt);
   }
   async tick(force=false) {
     if(this.running || (!force && this.now()-this.lastAttempt<300000))return;
     this.running=true;this.lastAttempt=this.now();
     try {
-      if(this.ready)await this.ready;
-      const row=(await this.store.db.prepare('SELECT * FROM forum_recovery WHERE guild_id=? AND forum_id=?').get(this.config.guildId,this.config.forumId));
+      let row=await this.store.recoveryCheckpoint(this.config);
+      if(!row) {
+        await this.store.initializeRecovery(this.config,this.startedAt);
+        row=await this.store.recoveryCheckpoint(this.config);
+      }
       const until=this.now(),since=Math.max(row.started_at,row.scanned_at-60000);let queued=0;
       const threads=await this.scan(since,until);
       for(const thread of threads)if(isTargetThread(thread,true,this.config) && await this.store.enqueue(thread.id,this.config))queued++;
       // Advance only after all pages have been read and all candidates durably enqueued.
-      (await this.store.db.prepare('UPDATE forum_recovery SET scanned_at=? WHERE guild_id=? AND forum_id=?').run(until,this.config.guildId,this.config.forumId));
+      await this.store.advanceRecovery(this.config,until);
       this.log('recovery_scan_completed',{queued});
     } catch {this.log('recovery_scan_failed',{code:'discord_recovery_failed'});}
     finally{this.running=false;}

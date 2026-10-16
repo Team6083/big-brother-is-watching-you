@@ -16,14 +16,18 @@
     "tasks:register": "node src/tasks/register.js",
     "dev": "node --env-file-if-exists=.env src/index.js",
     "migrate": "node src/state/migrate.js",
-    "audit:public": "node scripts/check-public.mjs",
-    "import:sqlite": "node src/state/import-sqlite.js"
+    "audit:public": "node scripts/check-public.mjs"
   },
   "dependencies": {
     "discord.js": "14.27.0",
-    "pg": "8.23.1"
+    "mongodb": "7.7.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.10"
+    "mongodb-memory-server": "11.3.0"
+  },
+  "config": {
+    "mongodbMemoryServer": {
+      "disablePostinstall": true
+    }
   }
 }

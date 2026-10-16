@@ -1,0 +1,115 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {MongoMemoryReplSet} from 'mongodb-memory-server';
+import {MongoDatabase,openDatabase,migrate} from '../src/state/database.js';
+import {MongoStore} from '../src/state/queue.js';
+import {MongoTaskStore} from '../src/state/tasks.js';
+import {MongoMeetingStore} from '../src/state/meetings.js';
+import {MongoDeliveryStore} from '../src/state/deliveries.js';
+import {meetingChannelId,MeetingReminder} from '../src/meetings.js';
+import {Worker} from '../src/worker.js';
+import {Recovery} from '../src/recovery.js';
+import {TaskService} from '../src/tasks/service.js';
+import {notifyThreads} from '../src/pm/notify.js';
+import {serveHealth} from '../src/health.js';
+
+test('MongoDB replica-set integration', {timeout:360000},async t=>{
+  const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
+  let db;
+  t.after(async()=>{await db?.close();await replica.stop();});
+  const rootUri=replica.getUri('bot_test').replace('mongodb://','mongodb://test_root:test-root-password@')+'&authSource=admin';
+  db=await openDatabase({MONGODB_URI:rootUri});
+  assert.equal(db.database.databaseName,'bot_test');
+  assert.ok(db instanceof MongoDatabase);await migrate(db);await migrate(db);await db.check();
+  const queue=new MongoStore(db),tasks=new MongoTaskStore(db),meetings=new MongoMeetingStore(db);
+  const guild='900000000000000100',forum='900000000000000101',thread='900000000000000102',actor='900000000000000103';
+  const config={guildId:guild,forumId:forum,notify:true};let now=Date.parse('2026-10-16T10:00:00Z');
+  await t.test('database readWrite role can initialize, check and transact without admin privileges',async()=>{
+    await db.client.db('limited_test').command({createUser:'test_app',pwd:'test-app-password',roles:[{role:'readWrite',db:'limited_test'}]});
+    const uri=replica.getUri('limited_test').replace('mongodb://','mongodb://test_app:test-app-password@')+'&authSource=limited_test';
+    const limited=await openDatabase({MONGODB_URI:uri});
+    try {
+      assert.equal(limited.database.databaseName,'limited_test');
+      await migrate(limited);await limited.check();
+      await new MongoMeetingStore(limited).set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:00');
+      await assert.rejects(limited.client.db('admin').command({usersInfo:1}),error=>error.code===13);
+    }finally{await limited.close();}
+  });
+  await t.test('concurrent enqueue, atomic claim and lease fencing prevent duplicates',async()=>{
+    const added=await Promise.all([queue.enqueue(thread,config,now),queue.enqueue(thread,config,now)]);assert.equal(added.filter(Boolean).length,1);
+    const claimed=await Promise.all([queue.claim(config,now),queue.claim(config,now)]),row=claimed.find(Boolean);assert.equal(claimed.filter(Boolean).length,1);
+    await assert.rejects(queue.update({...row,lease_token:'wrong'},{status:'failed'}),/lease_lost/);
+    await assert.rejects(queue.update(row,{status:'invalid'}),/invalid_store_update/);await queue.release(row);
+  });
+  await t.test('Make retry is durable; only a confirmed card triggers a reply',async()=>{
+    let sends=0,replies=0;
+    const proposal={event_type:'proposal_created',guild_id:guild,forum_channel_id:forum,thread_id:thread,starter_message_id:thread,title:'Example',content:'Synthetic',author_id:actor,author_name:'Example',created_at:new Date(now).toISOString(),discord_url:`https://discord.com/channels/${guild}/${thread}`,tags:[]};
+    const worker=new Worker({store:queue,config,now:()=>now,random:()=>0,log:()=>{},discord:{fetchProposal:async()=>proposal,notify:async()=>{replies++;return {id:actor};}},send:async()=>{sends++;if(sends===1)throw new Error('temporary');return {thread_id:thread,trello_card_id:'aaaaaaaaaaaaaaaaaaaaaaaa',trello_card_url:'https://trello.com/c/example1'};}});
+    await worker.tick();assert.equal((await queue.get(thread)).status,'awaiting_confirmation');assert.equal(replies,0);
+    now+=120000;await worker.tick();assert.equal((await queue.get(thread)).status,'succeeded');assert.equal(replies,1);
+    assert.equal(await new MongoStore(db).enqueue(thread,config,now),false);await worker.tick();assert.equal(sends,2);
+  });
+  await t.test('partial unique index protects task changes and member mappings',async()=>{
+    await tasks.map(guild,actor,'aaaaaaaaaaaaaaaaaaaaaaaa');assert.equal(await tasks.member(guild,actor),'aaaaaaaaaaaaaaaaaaaaaaaa');
+    await assert.rejects(tasks.map(guild,'900000000000000104','aaaaaaaaaaaaaaaaaaaaaaaa'),error=>error.code===11000);
+    await tasks.begin('one','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{idList:'list'});
+    await assert.rejects(tasks.begin('two','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{}),error=>error.code===11000);
+    await tasks.finish('one',{kind:'status'});assert.equal(await tasks.pending('bbbbbbbbbbbbbbbbbbbbbbbb'),undefined);
+  });
+  await t.test('task service confirms updates using MongoDB state',async()=>{
+    const board='cccccccccccccccccccccccc',card={id:'aaaaaaaaaaaaaaaaaaaaaaaa',idBoard:board,idList:'old',idMembers:[],name:'Example',desc:'CMSFTC_THREAD_ID='+thread,closed:false,shortUrl:'https://trello.com/c/example1'};
+    const trello={board:async()=>({id:board,closed:false}),card:async()=>({...card}),lists:async()=>[{id:'list',idBoard:board,closed:false}],update:async(_,patch)=>Object.assign(card,patch)};
+    const service=new TaskService({store:tasks,proposalStore:queue,trello,config,policy:{mode:'forum'}});
+    await service.execute({id:'900000000000000105',thread:{id:thread,guildId:guild,parentId:forum,type:11},actor:{id:actor,canViewForum:true},kind:'status',input:{status:'list'}});
+    assert.equal(card.idList,'list');assert.equal((await tasks.get('900000000000000105')).state,'succeeded');
+  });
+  await t.test('meetings use transactions for dates, cancellation, and record history',async()=>{
+    await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');
+    await meetings.setRecord(meetingChannelId,'2026-10-20','https://example.org/notes',actor);
+    assert.equal((await new MongoMeetingStore(db).recordForMeeting(await meetings.get(meetingChannelId))).url,'https://example.org/notes');
+    await meetings.set(meetingChannelId,'2026-10-22','19:00',actor,'Room',now,'20:30');
+    assert.deepEqual(await meetings.recordDates(meetingChannelId),['2026-10-22','2026-10-20']);
+    await meetings.cancel(meetingChannelId,now);assert.deepEqual(await meetings.recordDates(meetingChannelId),['2026-10-20']);
+    await assert.rejects(db.transaction(async session=>{await db.collection('meeting_dates').insertOne({_id:'rollback',channel_id:meetingChannelId,meeting_date:'2026-10-30'},{session});throw new Error('rollback');}));
+    assert.equal(await db.collection('meeting_dates').findOne({_id:'rollback'}),null);
+  });
+  await t.test('meeting notices send once; uncertain sends survive reconnect',async()=>{
+    await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');let sent=0;
+    const reminder=new MeetingReminder({store:meetings,verify:async()=>{},send:async p=>{sent++;assert.match(p.content,/20:30/);return {id:actor};},now:()=>Date.parse('2026-10-19T17:00:00+08:00'),log:()=>{}});
+    await reminder.tick();await reminder.tick();assert.equal(sent,1);
+    await meetings.set(meetingChannelId,'2026-10-23','19:00',actor,'Room',now,'20:00');
+    await meetings.claim(await meetings.get(meetingChannelId));
+    await assert.rejects(meetings.cancel(meetingChannelId,now),/提醒正在發送/);
+    await assert.rejects(meetings.set(meetingChannelId,'2026-10-24','19:00',actor,'Room',now,'20:00'),/提醒正在發送/);
+    await meetings.recoverSending(meetingChannelId);assert.equal((await meetings.get(meetingChannelId)).status,'uncertain');
+  });
+  await t.test('recovery checkpoint survives a fresh store and never moves backwards',async()=>{
+    const recovery=new Recovery({store:queue,config,scan:async()=>[],log:()=>{},now:()=>now});await recovery.tick();
+    assert.equal((await new MongoStore(db).recoveryCheckpoint(config)).scanned_at,now);
+    await queue.advanceRecovery(config,now-1000);assert.equal((await queue.recoveryCheckpoint(config)).scanned_at,now);
+  });
+  await t.test('recovery retries a transient database failure without losing activation time',async()=>{
+    const scope={...config,forumId:'900000000000000199'};let fail=true,scans=0;
+    const store={db:db,recoveryCheckpoint:async c=>{if(fail){fail=false;throw new Error('temporary');}return queue.recoveryCheckpoint(c);},initializeRecovery:(...args)=>queue.initializeRecovery(...args),advanceRecovery:(...args)=>queue.advanceRecovery(...args)};
+    const recovery=new Recovery({store,config:scope,scan:async()=>{scans++;return [];},log:()=>{},now:()=>now});
+    await recovery.tick(true);await recovery.tick(true);assert.equal(scans,1);assert.equal((await queue.recoveryCheckpoint(scope)).started_at,now);
+  });
+  await t.test('PM delivery claims are atomic and notifications share the same database',async()=>{
+    const deliveries=new MongoDeliveryStore(db),claims=await Promise.all([deliveries.claim('same',now),deliveries.claim('same',now)]);assert.equal(claims.filter(Boolean).length,1);
+    let posts=0;
+    const report={fetched_at:new Date(now).toISOString(),tasks:[{task_id:'aaaaaaaaaaaaaaaaaaaaaaaa',title:'Example',warnings:['已逾期'],discord_thread_id:thread,deadline_phase:'overdue',due_date:new Date(now-1).toISOString(),discord_owner_ids:[actor]}]};
+    const fetchImpl=async(_,options)=>{if(options.method==='POST'){posts++;return new Response(JSON.stringify({id:actor}));}return new Response(JSON.stringify({guild_id:guild,parent_id:forum,type:11,thread_metadata:{}}));};
+    await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,fetchImpl,now});
+    await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,fetchImpl,now});assert.equal(posts,1);
+  });
+});
+
+test('health listener reports readiness and closes cleanly',async()=>{
+  let ready=false;const health=await serveHealth({port:0,host:'127.0.0.1',ready:()=>ready,alive:()=>true});
+  try {assert.equal((await fetch(`http://127.0.0.1:${health.port}/healthz`)).status,200);assert.equal((await fetch(`http://127.0.0.1:${health.port}/readyz`)).status,503);ready=true;assert.equal((await fetch(`http://127.0.0.1:${health.port}/readyz`)).status,200);}finally{await health.close();}
+});
+test('invalid MongoDB settings never expose credentials',async()=>{
+  for(const uri of [undefined,'https://user:secret@example.org','mongodb://user:secret@','mongodb://localhost/?replicaSet=rs0','mongodb://localhost/test','mongodb+srv://example.org/?authSource=admin','mongodb+srv://example.org/test','mongodb://localhost/bad%20name','mongodb://localhost/'+ 'a'.repeat(64)]) {
+    await assert.rejects(openDatabase({MONGODB_URI:uri}),{message:'invalid_mongodb_config'});
+  }
+});

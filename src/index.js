@@ -2,7 +2,8 @@ import { Recovery, listRecoveryThreads } from './recovery.js';
 import { Events } from 'discord.js';
 import { loadConfig } from './config.js';
 import { openStore } from './state/queue.js';
-import { acquireProcessLock } from './state/database.js';
+import { MongoMeetingStore } from './state/meetings.js';
+import { PmMonitor } from './pm/monitor.js';
 import { serveHealth } from './health.js';
 import { createClient, createDiscordAdapter, registerEvents } from './discord.js';
 import { sendProposal } from './webhook.js';
@@ -11,7 +12,7 @@ import { log } from './log.js';
 import { registerTaskInteractions } from './tasks/interactions.js';
 import { registerMeetings } from './meetings.js';
 
-let client, store, timer, heartbeat, worker, taskInteractions, recovery, recoveryTimer, meetings, meetingTimer, unlock, health, stopping = false;
+let client, store, timer, heartbeat, worker, taskInteractions, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, health, stopping = false;
 async function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -19,14 +20,15 @@ async function shutdown(code = 0) {
   clearInterval(heartbeat);
   clearInterval(recoveryTimer);
   clearInterval(meetingTimer);
+  clearInterval(pmTimer);
+  pm?.stop();
   client?.removeAllListeners(Events.InteractionCreate);
   client?.removeAllListeners(Events.ThreadCreate);
   const deadline = setTimeout(() => process.exit(1), 25_000);
   deadline.unref();
-  while (worker?.running || taskInteractions?.running || recovery?.running || meetings?.running) await new Promise(resolve => setTimeout(resolve, 100));
+  while (worker?.running || taskInteractions?.running || recovery?.running || meetings?.running || pm?.running) await new Promise(resolve => setTimeout(resolve, 100));
   await client?.destroy();
   await health?.close();
-  try {await unlock?.();}catch {log('shutdown_unlock_failed');}
   await store?.close();
   clearTimeout(deadline);
   process.exitCode = code;
@@ -40,8 +42,9 @@ process.on('uncaughtException', () => { log('fatal_error', { code: 'uncaught_exc
 try {
   const config = loadConfig();
   store = await openStore();
-  unlock=await acquireProcessLock(store.db,'bot:'+config.guildId,()=>{void shutdown(1);});
-  await store.db.prepare("UPDATE meetings SET status='uncertain' WHERE channel_id=? AND status='sending'").run(config.meetingChannelId);
+  await store.db.check();
+  await new MongoMeetingStore(store.db).recoverSending(config.meetingChannelId);
+  pm=new PmMonitor({state:store.db,log});
   client = createClient();
   health=await serveHealth({ready:()=>!stopping&&client.isReady(),alive:()=>!stopping});
   const discord = createDiscordAdapter(client, config);
@@ -69,6 +72,11 @@ try {
       const meetingTick=()=>{if(!stopping && client.isReady())meetings.tick().catch(()=>log('meeting_reminder_failed',{code:'meeting_database_failed'}));};
       meetingTimer=setInterval(meetingTick,60000);
       meetingTick();
+      if(pm.enabled) {
+        const pmTick=()=>{if(!stopping && client.isReady())void pm.tick();};
+        pmTimer=setInterval(pmTick,pm.intervalMs);
+        pmTick();
+      }
       void recovery.tick(true);
       log('bot_ready');
       tick();

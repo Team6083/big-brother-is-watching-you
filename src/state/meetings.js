@@ -1,51 +1,54 @@
-import {meetingTimes,meetingEnd,recordDate,recordLink} from "../meetings.js";
-export class PostgresMeetingStore {
-  constructor(db){this.db=db;}
-  async get(id) { return (await this.db.prepare('SELECT * FROM meetings WHERE channel_id=?').get(id)); }
+import {meetingTimes,meetingEnd,recordDate,recordLink} from '../meetings.js';
+
+const dateOf=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
+export class MongoMeetingStore {
+  constructor(db) {this.db=db;this.rows=db.collection('meetings');this.dates=db.collection('meeting_dates');this.records=db.collection('meeting_records');}
+  async get(id) {return await this.rows.findOne({_id:id})??undefined;}
+  async recoverSending(channel) {await this.rows.updateOne({_id:channel,status:'sending'},{$set:{status:'uncertain'}});}
   async set(id,date,time,actor,location,now=Date.now(),endTime) {
     location=location?.trim();
     if(!location || location.length>200 || /[\r\n]/.test(location))throw new Error('請填入會議地點（單行，最多 200 字）。');
-    const {starts,remind}=meetingTimes(date,time,now);
-    const ends=meetingEnd(date,time,endTime);
-    const row=await this.db.prepare(`WITH previous AS (
-      SELECT * FROM meetings WHERE channel_id=$1 FOR UPDATE
-    ), saved AS (
-      INSERT INTO meetings(channel_id,starts_at,remind_at,actor_id,location,ends_at,status) VALUES($1,$2,$3,$4,$5,$6,'pending')
-      ON CONFLICT(channel_id) DO UPDATE SET starts_at=excluded.starts_at,remind_at=excluded.remind_at,
-        actor_id=excluded.actor_id,location=excluded.location,ends_at=excluded.ends_at,
-        status=CASE WHEN meetings.starts_at=excluded.starts_at AND meetings.status!='cancelled' THEN meetings.status ELSE 'pending' END,
-        message_id=CASE WHEN meetings.starts_at=excluded.starts_at AND meetings.status!='cancelled' THEN meetings.message_id ELSE NULL END,
-        attempts=CASE WHEN meetings.starts_at=excluded.starts_at AND meetings.status!='cancelled' THEN meetings.attempts ELSE 0 END
-      WHERE meetings.status!='sending' RETURNING *
-    ), removed AS (
-      DELETE FROM meeting_dates USING previous WHERE meeting_dates.channel_id=$1 AND previous.starts_at>$7
-        AND meeting_dates.meeting_date=to_char(to_timestamp(previous.starts_at/1000.0) AT TIME ZONE 'Asia/Taipei','YYYY-MM-DD')
-        AND meeting_dates.meeting_date!=$8 AND EXISTS(SELECT 1 FROM saved)
-    ), remembered AS (
-      INSERT INTO meeting_dates SELECT channel_id,$8 FROM saved ON CONFLICT DO NOTHING
-    ) SELECT * FROM saved`).get(id,starts,remind,actor,location,ends,now,date);
-    if(!row)throw new Error('提醒正在發送，請稍後再修改。');
-    return row;
+    const {starts,remind}=meetingTimes(date,time,now),ends=meetingEnd(date,time,endTime);
+    return this.db.transaction(async session=>{
+      const old=await this.rows.findOne({_id:id},{session});
+      if(old?.status==='sending')throw new Error('提醒正在發送，請稍後再修改。');
+      const same=old?.starts_at===starts&&old.status!=='cancelled';
+      const row={_id:id,channel_id:id,starts_at:starts,remind_at:remind,actor_id:actor,location,ends_at:ends,
+        status:same?old.status:'pending',message_id:same?old.message_id:null,attempts:same?old.attempts:0};
+      await this.rows.replaceOne({_id:id},row,{upsert:true,session});
+      if(old && old.starts_at>now && dateOf(old.starts_at)!==date)await this.dates.deleteOne({_id:id+':'+dateOf(old.starts_at)},{session});
+      await this.dates.updateOne({_id:id+':'+date},{$setOnInsert:{channel_id:id,meeting_date:date}},{upsert:true,session});
+      return row;
+    });
   }
-  async cancel(id) {
-    const row=await this.db.prepare(`WITH cancelled AS (
-      UPDATE meetings SET status='cancelled' WHERE channel_id=$1 AND status!='sending' RETURNING *
-    ), removed AS (
-      DELETE FROM meeting_dates USING cancelled WHERE meeting_dates.channel_id=$1 AND cancelled.starts_at>$2
-        AND meeting_dates.meeting_date=to_char(to_timestamp(cancelled.starts_at/1000.0) AT TIME ZONE 'Asia/Taipei','YYYY-MM-DD')
-    ) SELECT * FROM cancelled`).get(id,Date.now());
-    return row?1:0;
+  async cancel(id,now=Date.now()) {
+    return this.db.transaction(async session=>{
+      const old=await this.rows.findOne({_id:id},{session});
+      if(!old)return 0;
+      if(old.status==='sending')throw new Error('提醒正在發送，請稍後再操作。');
+      await this.rows.updateOne({_id:id},{$set:{status:'cancelled'}},{session});
+      if(old.starts_at>now)await this.dates.deleteOne({_id:id+':'+dateOf(old.starts_at)},{session});
+      return 1;
+    });
   }
   async recordDates(channel) {
-    return (await this.db.prepare(`SELECT meeting_date FROM meeting_dates WHERE channel_id=?
-      UNION SELECT meeting_date FROM meeting_records WHERE channel_id=? ORDER BY meeting_date DESC`).all(channel,channel)).map(row=>row.meeting_date);
+    const [dates,records]=await Promise.all([this.dates.distinct('meeting_date',{channel_id:channel}),this.records.distinct('meeting_date',{channel_id:channel})]);
+    return [...new Set([...dates,...records])].sort().reverse();
   }
   async setRecord(channel,date,url,actor) {
-    const validDate=recordDate(date),validUrl=recordLink(url);
-    (await this.db.prepare(`INSERT INTO meeting_records VALUES(?,?,?,?,?) ON CONFLICT(channel_id,meeting_date)
-      DO UPDATE SET url=excluded.url,actor_id=excluded.actor_id,updated_at=excluded.updated_at`).run(channel,validDate,validUrl,actor,Date.now()));
-    return this.record(channel,validDate);
+    const valid=recordDate(date),link=recordLink(url);
+    await this.records.updateOne({_id:channel+':'+valid},{$set:{channel_id:channel,meeting_date:valid,url:link,actor_id:actor,updated_at:Date.now()}},{upsert:true});
+    return this.record(channel,valid);
   }
-  async record(channel,date) {return (await this.db.prepare('SELECT * FROM meeting_records WHERE channel_id=? AND meeting_date=?').get(channel,recordDate(date)));}
-  async recordForMeeting(row) {return this.record(row.channel_id,new Date(row.starts_at+8*3600000).toISOString().slice(0,10));}
+  async record(channel,date) {return await this.records.findOne({_id:channel+':'+recordDate(date)})??undefined;}
+  recordForMeeting(row) {return this.record(row.channel_id,dateOf(row.starts_at));}
+  markMissed(row) {return this.rows.updateOne({_id:row.channel_id,starts_at:row.starts_at,status:'pending'},{$set:{status:'missed'}});}
+  verificationFailed(row) {
+    return this.rows.updateOne({_id:row.channel_id,starts_at:row.starts_at,status:'pending'},[
+      {$set:{status:{$cond:[{$gte:['$attempts',4]},'uncertain','pending']},attempts:{$add:['$attempts',1]}}},
+    ]);
+  }
+  async claim(row) {return await this.rows.findOneAndUpdate({_id:row.channel_id,starts_at:row.starts_at,status:'pending'},{$set:{status:'sending'}},{returnDocument:'after',includeResultMetadata:false})??undefined;}
+  markSent(row,id) {return this.rows.updateOne({_id:row.channel_id,starts_at:row.starts_at,status:'sending'},{$set:{status:'sent',message_id:id}});}
+  markUncertain(row) {return this.rows.updateOne({_id:row.channel_id,starts_at:row.starts_at,status:'sending'},{$set:{status:'uncertain'}});}
 }

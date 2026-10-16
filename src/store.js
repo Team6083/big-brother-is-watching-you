@@ -62,5 +62,11 @@ export class Store {
           fetch_attempts=0,send_attempts=0,last_error=NULL,next_attempt_at=0 WHERE thread_id=? AND lease_until<=? AND status='failed'`;
     return this.db.prepare(sql).run(id, now).changes === 1;
   }
+  initializeRecovery(config,now) {
+    this.db.exec('CREATE TABLE IF NOT EXISTS forum_recovery(guild_id TEXT NOT NULL,forum_id TEXT NOT NULL,started_at INTEGER NOT NULL,scanned_at INTEGER NOT NULL,PRIMARY KEY(guild_id,forum_id))');
+    this.db.prepare('INSERT OR IGNORE INTO forum_recovery VALUES(?,?,?,?)').run(config.guildId,config.forumId,now,now);
+  }
+  recoveryCheckpoint(config) {return this.db.prepare('SELECT * FROM forum_recovery WHERE guild_id=? AND forum_id=?').get(config.guildId,config.forumId);}
+  advanceRecovery(config,until) {this.db.prepare('UPDATE forum_recovery SET scanned_at=MAX(scanned_at,?) WHERE guild_id=? AND forum_id=?').run(until,config.guildId,config.forumId);}
   close() { this.db.close(); }
 }
