@@ -10,9 +10,10 @@ import { sendProposal } from './webhook.js';
 import { Worker } from './worker.js';
 import { log } from './log.js';
 import { registerTaskInteractions } from './tasks/interactions.js';
+import {registerTeamTaskCreation} from './tasks/create-interactions.js';
 import { registerMeetings } from './meetings.js';
 
-let client, store, timer, heartbeat, worker, taskInteractions, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, health, stopping = false;
+let client, store, timer, heartbeat, worker, taskInteractions, taskCreation, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, health, stopping = false;
 async function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -26,7 +27,7 @@ async function shutdown(code = 0) {
   client?.removeAllListeners(Events.ThreadCreate);
   const deadline = setTimeout(() => process.exit(1), 25_000);
   deadline.unref();
-  while (worker?.running || taskInteractions?.running || recovery?.running || meetings?.running || pm?.running) await new Promise(resolve => setTimeout(resolve, 100));
+  while (worker?.running || taskInteractions?.running || taskCreation?.running || recovery?.running || meetings?.running || pm?.running) await new Promise(resolve => setTimeout(resolve, 100));
   await client?.destroy();
   await health?.close();
   await store?.close();
@@ -52,6 +53,7 @@ try {
   registerEvents(client, store, config, log);
   recovery=new Recovery({store,config,scan:(since,until)=>listRecoveryThreads(client.rest,config,since,until),log});
   taskInteractions = registerTaskInteractions(client, store, config, log);
+  taskCreation=registerTeamTaskCreation(client,store,config,log);
   meetings = registerMeetings(client, store, config, log);
   client.on(Events.Error, () => { log('discord_error', { code: 'discord_client_error' }); void shutdown(1); });
   client.on(Events.ShardError, () => log('discord_connection_error', { code: 'gateway_transport_error' }));

@@ -8,12 +8,13 @@ Discord 專案管理 Bot。成員在 Discord 討論及更新任務，Trello 保�
 
 - 指定論壇新貼文經 Make 同步至 Trello；一般聊天與後續留言不會另建卡片。
 - `/任務`：查看任務、Owner／Assignee、描述、開始／截止日期，以及更新狀態。
+- `/建立任務`：在允許的隊長／幹部文字頻道填寫內容、選人員／日期／狀態，預覽後建立任務討論串及共用看板卡片。
 - 截止前 24 小時、1 小時及逾期各提醒一次，發在任務原討論串。
 - `/會議設定`：選日期及開始／結束時間、填地點、預覽後確認；會議前一天台灣時間 17:00 提及指定角色。
 - `/會議記錄設定`、`/查看會議記錄`：從已登錄會議日期選擇，保存／查詢 HTTPS 連結。
 - 重連後補抓啟用之後漏掉的論壇文章，保留持久化去重。
 
-一般文字頻道 `/建立任務` 尚未完成，不註冊為可用功能。AI 分析、自動決策與對外公告尚未實作。
+AI 分析、自動決策與對外公告尚未實作。
 
 ## 開發與執行
 
@@ -52,9 +53,10 @@ npm start
 | `MAKE_WEBHOOK_URL`、`MAKE_WEBHOOK_API_KEY` | 私密 Webhook 及選用驗證金鑰 |
 | `MONGODB_URI` | MongoDB 連線字串，機密；路徑必須包含專用 database 名稱，取代舊 `DATABASE_URL` |
 | `DISCORD_NOTIFY` | 提案成功回覆，預設 true |
-| `TASK_CONTROLS_ENABLED` | 啟用 `/任務`，預設 false |
+| `TASK_CONTROLS_ENABLED` | 啟用任務控制，預設 false；建立任務另需設定允許頻道 |
 | `TASK_MANAGEMENT_MODE` | `forum`：可查看論壇成員；`roles`：限定角色 |
 | `TASK_MANAGER_ROLE_IDS` | `roles` 模式允許的角色，逗號分隔 |
+| `TASK_ALLOWED_CHANNEL_IDS` | 可用 `/建立任務` 的隊長／幹部文字頻道 ID，逗號分隔；留空停用 |
 | `TRELLO_BOARD_ID`、`TRELLO_API_KEY` | 看板與 API Key |
 | `TRELLO_WRITE_TOKEN` | 任務更新用 read/write Token，機密 |
 | `TRELLO_READ_TOKEN` | PM 查詢用 Token，機密 |
@@ -64,13 +66,26 @@ npm start
 | `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 會議頻道及提及角色，兩者都提供才啟用 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
-URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。資料庫名稱放在 URI 路徑，例如 `mongodb://localhost/botdb?replicaSet=rs0&authSource=admin`（僅為格式示例）。名稱限 1–63 個英數字、底線或連字號；省略名稱或使用 `test` 都會拒絕啟動，避免誤寫 driver 的預設資料庫。`authSource` 是獨立的認證來源，請依帳號設定；runtime 使用 URI 指定的 database。`TASK_ALLOWED_CHANNEL_IDS` 僅供已綁定文字討論串任務的相容用途，預設留空，不會將一般聊天轉成任務。
+URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。資料庫名稱放在 URI 路徑，例如 `mongodb://localhost/botdb?replicaSet=rs0&authSource=admin`（僅為格式示例）。名稱限 1–63 個英數字、底線或連字號；省略名稱或使用 `test` 都會拒絕啟動，避免誤寫 driver 的預設資料庫。`authSource` 是獨立的認證來源，請依帳號設定；runtime 使用 URI 指定的 database。一般聊天不會自動轉成任務，必須明確操作 `/建立任務`。
+
+## 隊長／幹部建立任務
+
+啟用及故障核對完整步驟見 [文字頻道任務](docs/team-tasks.md)。成員不需要 Trello 帳號。
+
+1. 在允許的文字頻道輸入 `/建立任務`，按「填寫任務」。
+2. 填任務名稱及描述模板；用選單選 Owner（1–5 位）、Assignee（1 位）及既有看板狀態。
+3. 在私人預覽中按「選擇開始日期」「選擇截止日期」，選年、月、日；26 日以後可翻頁，也可不設定／清除。開始採台灣時間 00:00，截止採 23:59。
+4. 按「確認建立」。Bot 在原頻道底下開討論串，直接以既有 Trello 寫入授權建立卡片，不經 Make；一般論壇提案仍沿用 Make。
+5. 實際確認建卡並保存綁定後，才在新討論串張貼描述、日期與狀態並 @Owner／Assignee。後續在此使用 `/任務`；PM 的到期提醒也留在此討論串。
+
+本次新增建立表單的日期全部使用選單；既有 `/任務` 的修改表單仍沿用原本的日期欄位。未確認建立前的草稿保留 15 分鐘，重啟後須重填；已送出的操作及建卡核對紀錄保存在 MongoDB。
 
 ## Discord 與 Make
 
 1. 管理員建立 Bot，開啟 Message Content Intent，以 `bot`、`applications.commands` scopes 邀請。
 2. 只授權指定論壇／頻道，不要求 Administrator。論壇需要 View Channel、Read Message History，回覆需 Send Messages in Threads。
 3. 會議頻道需要 View Channel、Send Messages，以及提及指定角色的權限。程式不允許 @everyone。
+   隊長／幹部任務頻道另需 Read Message History、Create Public Threads、Send Messages in Threads。此處「公開討論串」只對有權查看其私人父頻道的成員可見，不會新增父頻道權限。
 4. `tasks:register` 只逐一更新本專案已啟用的指令；停用功能後重跑會移除對應舊指令。
 5. 依 [Webhook 契約與去重](docs/webhook.md) 設定 Make。收到 Accepted 不代表 Trello 成功。
 

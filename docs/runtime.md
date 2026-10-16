@@ -21,12 +21,13 @@
 
 使用官方 `mongodb` driver，不使用 Mongoose，也沒有 SQL 翻譯介面。`src/state/` 提供具名資料操作；runtime 不呼叫 `prepare(sql)`。
 
-八個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`。
+九個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`task_creations`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`。升級後先執行 `npm run migrate`，建立新增的 `task_creations`；runtime 的 `check` 會確認它存在。
 
 - Discord ID 及卡片 ID 都是字串；毫秒 timestamp 是 JS 安全整數。
 - `_id` 保存 Thread ID、Interaction ID、delivery key 或由 channel／date 等欄位組成的識別碼。
 - proposals 以 `findOneAndUpdate` 原子取得租約；寫入必須持有相同 lease token。
 - 任務 pending 使用 partial unique index；同一張卡同時只能有一項待確認更新。
+- 文字頻道建立任務以草稿操作 ID 作為 `task_creations._id`，在建立 Discord 討論串前就原子保留。`thread_pending`／`card_pending` 保存結果不明的操作；只有確認完整卡片欄位後才在 transaction 中一起保存提案綁定及 `succeeded`。重啟後可核對，不自動重送建立請求。通知另以 pending→sending→sent 記錄，sending 不重送。
 - 會議設定／取消與日期歷史使用 transaction。callback 只含資料庫操作，可安全由 driver 重試，沒有 Discord／Trello 副作用。
 - 不設 TTL 刪除去重、會議或提醒歷史。
 - 狀態由 store 方法檢查並限定寫入值，不要求 collection validator。直接手動改 DB 不受此層驗證保護。

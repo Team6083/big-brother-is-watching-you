@@ -9,9 +9,11 @@ import { TaskStore } from './store.js';
 import { taskConfig, trelloTasks } from './trello.js';
 import { TaskService } from './service.js';
 import { isTaskThread } from './scope.js';
+import {createTaskCommand} from './create-ui.js';
 
 export const taskCommands = [
-  new SlashCommandBuilder().setName('任務').setDescription('開啟此提案的任務操作表單')
+  new SlashCommandBuilder().setName('任務').setDescription('開啟此提案的任務操作表單'),
+  createTaskCommand,
 ];
 
 export function controls(draftId) {

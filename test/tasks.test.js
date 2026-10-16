@@ -130,7 +130,7 @@ test('Trello adapter uses separate write header, only bounded intended methods a
 });
 test('UI uses current label modals, bounded owner select and valid guild command schemas',()=>{
   assert.equal(taskModal('dates').toJSON().components.length,2);assert.throws(()=>taskModal('progress'),/task_progress_retired/);
-  assert.equal(controls()[0].toJSON().components.length,4);assert.equal(taskCommands.length,1);assert.ok(taskCommands.every(c=>c.toJSON().name));
+  assert.equal(controls()[0].toJSON().components.length,4);assert.deepEqual(taskCommands.map(c=>c.toJSON().name),['任務','建立任務']);
   assert.equal(taskConfig({}).enabled,false);assert.throws(()=>taskConfig({TASK_MANAGEMENT_MODE:'roles'}),/task_invalid_management_policy/);
 });
 test('PM recognizes only confirmed Discord progress receipts even when automation author is excluded',()=>{

@@ -26,8 +26,9 @@ export async function notifyThreads(report,config,{fetchImpl=fetch,now=Date.now(
         if(!response.ok){await response.body?.cancel();results.push({card_id:task.task_id,status:'thread_unavailable'});continue;}
         channel=await response.json();
       }catch{results.push({card_id:task.task_id,status:'thread_unavailable'});continue;}
-      if(channel.guild_id!==config.guildId || (channel.parent_id!==config.forumId&&!await isBoundTeamTask(store,config.guildId,channel.parent_id,task.discord_thread_id,task.task_id)) ||
-        channel.type!==11 || channel.thread_metadata?.archived || channel.thread_metadata?.locked){results.push({card_id:task.task_id,status:'outside_forum_or_archived'});continue;}
+      const boundTeam=channel.guild_id===config.guildId && channel.parent_id!==config.forumId && await isBoundTeamTask(store,config.guildId,channel.parent_id,task.discord_thread_id,task.task_id);
+      if(channel.guild_id!==config.guildId || (channel.parent_id!==config.forumId&&!boundTeam) ||
+        channel.type!==11 || (channel.thread_metadata?.archived&&!boundTeam) || channel.thread_metadata?.locked){results.push({card_id:task.task_id,status:'outside_forum_or_archived'});continue;}
       if(!await store.claim(key,now))continue;
       const title=String(task.title).replace(/[\r\n@`<>]/g,' ').slice(0,150);
       const content=`【Project Manager】\n${owners.map(id=>'<@'+id+'>').join(' ')}\n「${title}」：${task.warnings.join('、')}。\n請在原討論串輸入 /任務 →「更新狀態」；若遇到問題，請在討論串中討論。\n資料截至 ${report.fetched_at}。任務分配與日期調整由授權成員明確操作。`;

@@ -1,6 +1,6 @@
 import {MongoClient} from 'mongodb';
 
-export const collections=['proposals','forum_recovery','task_members','task_changes','meetings','meeting_records','meeting_dates','pm_deliveries'];
+export const collections=['proposals','forum_recovery','task_members','task_changes','task_creations','meetings','meeting_records','meeting_dates','pm_deliveries'];
 const transactionOptions={readConcern:{level:'snapshot'},writeConcern:{w:'majority'},readPreference:'primary',maxCommitTimeMS:5000,timeoutMS:15000};
 
 export class MongoDatabase {
@@ -17,7 +17,7 @@ export class MongoDatabase {
   async check() {
     const hello=await this.database.command({hello:1});
     if(!hello.setName && hello.msg!=='isdbgrid')throw new Error('mongodb_replica_set_required');
-    for(const [name,index] of [['proposals','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_']]) {
+    for(const [name,index] of [['proposals','_id_'],['task_creations','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_']]) {
       const indexes=await this.collection(name).listIndexes().toArray(),found=indexes.find(i=>i.name===index);
       if(!found || (index!=='_id_'&&!found.unique) || index==='task_one_pending'&&found.partialFilterExpression?.state!=='pending')throw new Error('mongodb_indexes_missing');
     }
