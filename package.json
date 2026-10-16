@@ -1,0 +1,29 @@
+{
+  "name": "big-brother-is-watching-you",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord forum task management, meeting reminders and record lookup",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --import ./test/env.js --test test/*.test.js",
+    "admin": "node src/admin.js",
+    "check": "node src/check.js",
+    "pm": "node src/pm/cli.js",
+    "tasks:register": "node src/tasks/register.js",
+    "dev": "node --env-file-if-exists=.env src/index.js",
+    "migrate": "node src/state/migrate.js",
+    "audit:public": "node scripts/check-public.mjs",
+    "import:sqlite": "node src/state/import-sqlite.js"
+  },
+  "dependencies": {
+    "discord.js": "14.27.0",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.10"
+  }
+}
