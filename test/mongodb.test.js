@@ -12,6 +12,8 @@ import {Recovery} from '../src/recovery.js';
 import {TaskService} from '../src/tasks/service.js';
 import {notifyThreads} from '../src/pm/notify.js';
 import {serveHealth} from '../src/health.js';
+import {MongoCreationStore} from '../src/state/creations.js';
+import {TaskCreationService} from '../src/tasks/create-service.js';
 
 test('MongoDB replica-set integration', {timeout:360000},async t=>{
   const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
@@ -101,6 +103,38 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     const fetchImpl=async(_,options)=>{if(options.method==='POST'){posts++;return new Response(JSON.stringify({id:actor}));}return new Response(JSON.stringify({guild_id:guild,parent_id:forum,type:11,thread_metadata:{}}));};
     await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,fetchImpl,now});
     await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,fetchImpl,now});assert.equal(posts,1);
+  });
+  await t.test('team creation receipts persist, reconcile lost replies and bind existing task controls and PM',async()=>{
+    const creation=new MongoCreationStore(db),parent='900000000000000010',teamThread='900000000000000120',operation='900000000000000121';
+    const board='eeeeeeeeeeeeeeeeeeeeeeee',list='ffffffffffffffffffffffff';let writes=0,pings=0,threads=0;const cards=[];
+    const trello={board:async()=>({id:board}),lists:async()=>[{id:list,idBoard:board,name:'待執行'}],card:async()=>cards[0],cardsForThread:async()=>cards,
+      create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://trello.com/c/example2',closed:false});throw Error('task_trello_unconfirmed');}};
+    const discord={createThread:async()=>{threads++;return {id:teamThread,guildId:guild,parentId:parent,type:11};},notify:async()=>{pings++;return {id:actor};}};
+    const service=new TaskCreationService({store:creation,trello,discord,authorize:async()=>{}});
+    const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:actor,status:list,due:'2026-10-20'}};
+    await assert.rejects(service.create(op));assert.equal((await creation.get(operation)).state,'card_pending');assert.equal(pings,0);
+    const restarted=new TaskCreationService({...service,store:new MongoCreationStore(db)});
+    await Promise.all([restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor}),restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor})]);
+    assert.equal(writes,1);assert.equal(threads,1);assert.equal(pings,1);
+    assert.equal((await queue.get(teamThread)).status,'succeeded');
+    const controls=new TaskService({store:tasks,proposalStore:queue,trello,config,policy:{mode:'forum'}});
+    assert.equal((await controls.context({id:teamThread,guildId:guild,parentId:parent,type:11},{id:actor,canViewForum:true})).id,cards[0].id);
+    assert.equal(await new MongoDeliveryStore(db).isBoundTask(guild,parent,teamThread,cards[0].id),true);
+    assert.equal(await new MongoDeliveryStore(db).isBoundTask(guild,forum,teamThread,cards[0].id),false);
+    let sends=0,locked=true;
+    const report={fetched_at:new Date(now).toISOString(),tasks:[{task_id:cards[0].id,title:'Team task',warnings:['已逾期'],deadline_phase:'overdue',due_date:'2026-10-20T15:59:00Z',discord_thread_id:teamThread,discord_owner_ids:[actor]}]};
+    const fetchImpl=async(_,options)=>{if(options.method==='POST'){sends++;return Response.json({id:actor});}return Response.json({guild_id:guild,parent_id:parent,type:11,thread_metadata:{archived:true,locked}});};
+    await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,now,fetchImpl});assert.equal(sends,0);
+    locked=false;await notifyThreads(report,{guildId:guild,forumId:forum,token:'test-only'},{state:db,now,fetchImpl});
+    assert.equal(sends,1);
+  });
+  await t.test('team creation reservation is atomic and failed binding transaction cannot mark success',async()=>{
+    const creation=new MongoCreationStore(db),id='900000000000000130',teamThread='900000000000000131';
+    const row={id,guild_id:guild,channel_id:'900000000000000010',actor_id:actor,input:{}};
+    const results=await Promise.all([creation.reserve(row),new MongoCreationStore(db).reserve(row)]);assert.equal(results.filter(Boolean).length,1);
+    await creation.attachThread(id,teamThread);await db.collection('proposals').insertOne({_id:teamThread,guild_id:guild,forum_id:forum,status:'pending'});
+    await assert.rejects(creation.finish(id,{id:'dddddddddddddddddddddddd',shortUrl:'https://trello.com/c/example2'}),/create_binding_conflict/);
+    assert.equal((await creation.get(id)).state,'card_pending');assert.equal((await queue.get(teamThread)).status,'pending');
   });
 });
 
