@@ -44,6 +44,8 @@ npm start
 
 `migrate` 僅建立必要 collection 與索引，不搬移資料、不刪除資料。runtime 不自動建索引。團隊提供該 database 的內建 `readWrite` role，可供初始化與日常讀寫使用，不需要 admin 或 dbAdmin。
 
+Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯誤碼及排查提示，不含 URI、帳密或原始錯誤訊息；見 [Migration 失敗診斷](docs/migration-troubleshooting.md)。
+
 ## 設定
 
 | 變數 | 用途 |
