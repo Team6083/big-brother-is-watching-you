@@ -1,4 +1,5 @@
 import {MongoClient} from 'mongodb';
+import {DatabaseFailure} from './diagnostics.js';
 
 export const collections=['proposals','forum_recovery','task_members','task_changes','task_creations','meetings','meeting_records','meeting_dates','pm_deliveries'];
 const transactionOptions={readConcern:{level:'snapshot'},writeConcern:{w:'majority'},readPreference:'primary',maxCommitTimeMS:5000,timeoutMS:15000};
@@ -26,29 +27,45 @@ export class MongoDatabase {
 }
 
 export async function openDatabase(env=process.env) {
-  if(typeof env.MONGODB_URI!=='string' || !/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI))throw new Error('invalid_mongodb_config');
+  if(typeof env.MONGODB_URI!=='string'||!env.MONGODB_URI.trim())throw new DatabaseFailure('invalid_mongodb_config',{stage:'configuration',reason:'missing_uri'});
+  if(!/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI))throw new DatabaseFailure('invalid_mongodb_config',{stage:'configuration',reason:'invalid_uri_scheme'});
   let client;
   try {
     client=new MongoClient(env.MONGODB_URI,{maxPoolSize:8,serverSelectionTimeoutMS:5000,connectTimeoutMS:5000,socketTimeoutMS:15000,timeoutMS:10000,writeConcern:{w:'majority'}});
-    if(!/^[a-zA-Z0-9_-]{1,63}$/.test(client.options.dbName||'') || client.options.dbName==='test')throw new Error('invalid_mongodb_config');
-  } catch {await client?.close().catch(()=>{});throw new Error('invalid_mongodb_config');}
+    if(client.options.dbName==='test')throw new DatabaseFailure('invalid_mongodb_config',{stage:'configuration',reason:'default_database_forbidden'});
+    if(!/^[a-zA-Z0-9_-]{1,63}$/.test(client.options.dbName||''))throw new DatabaseFailure('invalid_mongodb_config',{stage:'configuration',reason:'invalid_database_name'});
+  } catch(error) {
+    await client?.close().catch(()=>{});
+    throw error instanceof DatabaseFailure?error:new DatabaseFailure('invalid_mongodb_config',{stage:'configuration',reason:'invalid_uri'},error);
+  }
+  let stage='connect';
   try {
     await client.connect();
     const state=new MongoDatabase(client);
-    await state.database.command({ping:1});
+    stage='ping';await state.database.command({ping:1});
     return state;
-  } catch {await client?.close().catch(()=>{});throw new Error('mongodb_unavailable');}
+  } catch(error) {await client?.close().catch(()=>{});throw new DatabaseFailure('mongodb_unavailable',{stage},error);}
 }
 
 export async function migrate(db) {
   // The supplied database readWrite role can create these collections/indexes.
   // No admin command, collection validator, TTL or destructive migration is used.
-  for(const name of collections) {
-    if(!(await db.database.listCollections({name},{nameOnly:true}).toArray()).length) {
-      try {await db.database.createCollection(name);}catch(error){if(error.code!==48)throw error;}
+  let stage='list_collections',collection,index;
+  try {
+    for(const name of collections) {
+      collection=name;stage='list_collections';
+      if(!(await db.database.listCollections({name},{nameOnly:true}).toArray()).length) {
+        stage='create_collection';
+        try {await db.database.createCollection(name);}catch(error){if(error.code!==48)throw error;}
+      }
     }
-  }
-  await db.collection('proposals').createIndex({guild_id:1,forum_id:1,next_attempt_at:1,received_at:1},{name:'proposals_due'});
-  await db.collection('task_members').createIndex({guild_id:1,trello_id:1},{name:'member_trello_unique',unique:true});
-  await db.collection('task_changes').createIndex({card_id:1},{name:'task_one_pending',unique:true,partialFilterExpression:{state:'pending'}});
+    for(const [name,fields,options] of [
+      ['proposals',{guild_id:1,forum_id:1,next_attempt_at:1,received_at:1},{name:'proposals_due'}],
+      ['task_members',{guild_id:1,trello_id:1},{name:'member_trello_unique',unique:true}],
+      ['task_changes',{card_id:1},{name:'task_one_pending',unique:true,partialFilterExpression:{state:'pending'}}],
+    ]) {
+      stage='create_index';collection=name;index=options.name;
+      await db.collection(name).createIndex(fields,options);
+    }
+  } catch(error) {throw new DatabaseFailure('mongodb_migration_failed',{stage,collection,index},error);}
 }

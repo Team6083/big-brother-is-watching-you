@@ -14,6 +14,7 @@ import {notifyThreads} from '../src/pm/notify.js';
 import {serveHealth} from '../src/health.js';
 import {MongoCreationStore} from '../src/state/creations.js';
 import {TaskCreationService} from '../src/tasks/create-service.js';
+import {migrationFailure} from '../src/state/diagnostics.js';
 
 test('MongoDB replica-set integration', {timeout:360000},async t=>{
   const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
@@ -36,6 +37,44 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
       await new MongoMeetingStore(limited).set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:00');
       await assert.rejects(limited.client.db('admin').command({usersInfo:1}),error=>error.code===13);
     }finally{await limited.close();}
+  });
+  await t.test('real authentication failure reports code 18 without URI or password',async()=>{
+    const uri=replica.getUri('bot_test').replace('mongodb://','mongodb://test_root:synthetic_wrong_password@')+'&authSource=admin';
+    await assert.rejects(openDatabase({MONGODB_URI:uri}),error=>{
+      const output=migrationFailure(error);assert.equal(output.code,'mongodb_unavailable');assert.equal(output.stage,'connect');assert.equal(output.mongo_code,18);assert.equal(output.reason,'authentication_failed');
+      assert.ok(!JSON.stringify(output).includes('synthetic_wrong_password'));assert.ok(!JSON.stringify(output).includes('test_root'));return true;
+    });
+  });
+  await t.test('real read-only user migration reports the collection and code 13',async()=>{
+    await db.client.db('migration_read_only').command({createUser:'migration_reader',pwd:'synthetic_read_password',roles:[{role:'read',db:'migration_read_only'}]});
+    const uri=replica.getUri('migration_read_only').replace('mongodb://','mongodb://migration_reader:synthetic_read_password@')+'&authSource=migration_read_only';
+    const limited=await openDatabase({MONGODB_URI:uri});
+    try {await assert.rejects(migrate(limited),error=>{
+      const output=migrationFailure(error);assert.equal(output.stage,'create_collection');assert.equal(output.collection,'proposals');assert.equal(output.mongo_code,13);assert.equal(output.reason,'authorization_failed');
+      assert.ok(!JSON.stringify(output).includes('migration_reader'));assert.ok(!JSON.stringify(output).includes('migration_read_only'));return true;
+    });}finally{await limited.close();}
+  });
+  await t.test('real conflicting index is diagnosed and never dropped',async()=>{
+    const uri=replica.getUri('migration_conflict').replace('mongodb://','mongodb://test_root:test-root-password@')+'&authSource=admin';
+    const conflict=await openDatabase({MONGODB_URI:uri});
+    try {
+      await conflict.collection('task_members').createIndex({guild_id:1,trello_id:1},{name:'member_trello_unique'});
+      await assert.rejects(migrate(conflict),error=>{
+        const output=migrationFailure(error);assert.equal(output.stage,'create_index');assert.equal(output.collection,'task_members');assert.equal(output.index,'member_trello_unique');assert.equal(output.reason,'index_conflict');return true;
+      });
+      const indexes=await conflict.collection('task_members').listIndexes().toArray();assert.equal(indexes.find(i=>i.name==='member_trello_unique').unique,undefined);
+    }finally{await conflict.close();}
+  });
+  await t.test('real duplicate data prevents a unique index and document values stay private',async()=>{
+    const uri=replica.getUri('migration_duplicates').replace('mongodb://','mongodb://test_root:test-root-password@')+'&authSource=admin';
+    const duplicates=await openDatabase({MONGODB_URI:uri});
+    try {
+      await duplicates.collection('task_members').insertMany([{_id:'one',guild_id:'synthetic_guild',trello_id:'private_duplicate_value'},{_id:'two',guild_id:'synthetic_guild',trello_id:'private_duplicate_value'}]);
+      await assert.rejects(migrate(duplicates),error=>{
+        const output=migrationFailure(error);assert.equal(output.stage,'create_index');assert.equal(output.index,'member_trello_unique');assert.equal(output.mongo_code,11000);assert.equal(output.reason,'duplicate_key');assert.ok(!JSON.stringify(output).includes('private_duplicate_value'));return true;
+      });
+      assert.equal(await duplicates.collection('task_members').countDocuments(),2);
+    }finally{await duplicates.close();}
   });
   await t.test('concurrent enqueue, atomic claim and lease fencing prevent duplicates',async()=>{
     const added=await Promise.all([queue.enqueue(thread,config,now),queue.enqueue(thread,config,now)]);assert.equal(added.filter(Boolean).length,1);
