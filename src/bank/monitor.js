@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {PermissionFlagsBits} from 'discord.js';
 import {MongoBankStore} from '../state/bank.js';
-import {bankConfig,readMissions,missionMessage,missionMarker} from './source.js';
+import {bankConfig,nextBankCheck,readMissions,missionMessage,missionMarker} from './source.js';
 
 export function bankDiscord(client,config) {
   async function channel() {
@@ -24,12 +24,22 @@ export function bankDiscord(client,config) {
 }
 
 export class BankMonitor {
-  constructor({state,client,env=process.env,store,discord,read=readMissions,now=Date.now,log}) {
-    this.config=bankConfig(env);this.enabled=this.config.enabled;this.intervalMs=this.config.intervalMs;
-    Object.assign(this,{read,now,log});this.running=false;this.stopping=false;this.abort=new AbortController();
+  constructor({state,client,env=process.env,store,discord,read=readMissions,now=Date.now,log,setTimer=setTimeout,clearTimer=clearTimeout}) {
+    this.config=bankConfig(env);this.enabled=this.config.enabled;
+    Object.assign(this,{read,now,log,setTimer,clearTimer});this.running=false;this.stopping=false;this.started=false;this.abort=new AbortController();
     if(this.enabled){this.store=store||new MongoBankStore(state);this.discord=discord||bankDiscord(client,this.config);}
   }
-  stop() {this.stopping=true;this.abort.abort();}
+  start() {
+    if(!this.enabled||this.started||this.stopping)return;
+    this.started=true;
+    const schedule=()=>{
+      if(this.stopping)return;
+      const now=this.now();
+      this.timer=this.setTimer(async()=>{try{await this.tick();}finally{schedule();}},nextBankCheck(now)-now);
+    };
+    schedule();
+  }
+  stop() {this.stopping=true;this.clearTimer(this.timer);this.abort.abort();}
   async tick() {
     if(!this.enabled||this.running||this.stopping)return;
     this.running=true;
@@ -43,7 +53,7 @@ export class BankMonitor {
       const uncertain=await this.store.uncertain(this.config.sourceKey);
       if(uncertain.length)for(const {row,id} of await this.discord.findSent(uncertain))await this.store.sent(row,id);
       const current=new Map(tasks.map(task=>[task.id,task]));
-      for(let count=0;count<5&&!this.stopping;count++) {
+      while(!this.stopping) {
         const row=await this.store.claim(this.config.sourceKey,this.now());if(!row)break;
         const task=current.get(row.task_id);
         if(!task?.active){await this.store.finish(row,'ignored',{last_error:'bank_task_not_open'});continue;}

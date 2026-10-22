@@ -69,7 +69,6 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `BANK_ENABLED` | 在主 Bot 啟用 Bank 新任務通知，預設 false |
 | `BANK_BASE_URL` | Bank 來源網站的 HTTPS 根網址，例如 `https://bank.example.org` |
 | `BANK_CHANNEL_ID` | Bank 任務通知的 Discord 文字頻道 ID |
-| `BANK_INTERVAL_MS` | Bank 查詢間隔，預設 60000 毫秒 |
 | `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 會議頻道及提及角色，兩者都提供才啟用 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
@@ -89,11 +88,11 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 
 ## Bank 新任務通知
 
-完整設定、去重與驗收步驟見 [Bank 新任務通知](docs/bank-notifications.md)。啟用 `BANK_ENABLED=true` 並設定來源及通知頻道後，主 Bot 預設每分鐘讀取網站的 `/api/gas-read?type=missionsList`，不需要 Bank API Key，也不經 Make。此功能不新增付費服務。
+完整設定、去重與驗收步驟見 [Bank 新任務通知](docs/bank-notifications.md)。啟用 `BANK_ENABLED=true` 並設定來源及通知頻道後，主 Bot 每天台灣時間 **06:00、17:00** 讀取網站的 `/api/gas-read?type=missionsList`，與伺服器時區無關。啟動及重啟均等待下一個時段；不需要 Bank API Key，也不經 Make。此功能不新增付費服務。
 
 第一次完整讀取成功時只保存既有任務 ID。之後新 ID 若狀態為「進行中」或「即將截止」，且截止日期空白或尚未超過台灣當日，就會公告標題、描述、分類、類型、日期、獎勵及 `/mission/{id}` 原始連結。既有 ID 編輯或重開不會重發，不提及 @everyone。開始日期不是發布時間；未來才開始的新任務也可預告。
 
-來源 API 沒有發布時間欄位，因此這是偵測「新出現的任務 ID」。通知約需一個查詢間隔，再加來源快取與網路延遲。升級需先執行 `npm run migrate` 建立 `bank_notifications` collection；部署及真實網站／Discord 驗收尚需由部署負責人執行。
+來源 API 沒有發布時間欄位，因此這是偵測「新出現的任務 ID」。首次排程只記錄基準，之後新任務在下一個檢查時段公告，另受來源快取與網路延遲影響；停機錯過時段會等重啟後的下一個時段，不補跑每個錯過的時段。舊的 `BANK_INTERVAL_MS` 設定已移除。升級需先執行 `npm run migrate` 建立 `bank_notifications` collection；部署及真實網站／Discord 驗收尚需由部署負責人執行。
 
 ## Discord 與 Make
 

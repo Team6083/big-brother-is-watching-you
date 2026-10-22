@@ -15,7 +15,7 @@ import { registerTaskInteractions } from './tasks/interactions.js';
 import {registerTeamTaskCreation} from './tasks/create-interactions.js';
 import { registerMeetings } from './meetings.js';
 
-let client, store, timer, heartbeat, worker, taskInteractions, taskCreation, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, bank, bankTimer, health, stopping = false;
+let client, store, timer, heartbeat, worker, taskInteractions, taskCreation, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, bank, health, stopping = false;
 async function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -24,7 +24,6 @@ async function shutdown(code = 0) {
   clearInterval(recoveryTimer);
   clearInterval(meetingTimer);
   clearInterval(pmTimer);
-  clearInterval(bankTimer);
   pm?.stop();
   bank?.stop();
   client?.removeAllListeners(Events.InteractionCreate);
@@ -84,10 +83,7 @@ try {
         pmTimer=setInterval(pmTick,pm.intervalMs);
         pmTick();
       }
-      if(bank.enabled) {
-        const bankTick=()=>{if(!stopping&&client.isReady())void bank.tick();};
-        bankTimer=setInterval(bankTick,bank.intervalMs);bankTick();
-      }
+      bank.start();
       void recovery.tick(true);
       log('bot_ready');
       tick();

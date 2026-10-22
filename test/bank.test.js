@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Collection} from 'discord.js';
-import {bankConfig,normalizeMissions,readMissions,missionMessage,missionMarker} from '../src/bank/source.js';
+import {bankConfig,nextBankCheck,normalizeMissions,readMissions,missionMessage,missionMarker} from '../src/bank/source.js';
 import {BankMonitor,bankDiscord} from '../src/bank/monitor.js';
 
 const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000201',DISCORD_GUILD_ID:'900000000000000200'};
@@ -11,9 +11,20 @@ const tasks=rows=>normalizeMissions(rows,config,now);
 
 test('Bank is disabled by default and validates explicit feature configuration',()=>{
   assert.deepEqual(bankConfig({}),{enabled:false});
-  for(const patch of [{BANK_ENABLED:'yes'},{BANK_BASE_URL:'http://bank.example.org'},{BANK_BASE_URL:'https://u:p@bank.example.org'},{BANK_BASE_URL:'https://bank.example.org/path'},{BANK_BASE_URL:'https://bank.example.org/?token=private'},{BANK_CHANNEL_ID:''},{DISCORD_GUILD_ID:'bad'},{BANK_INTERVAL_MS:'1000'}])assert.throws(()=>bankConfig({...env,...patch}),/bank_invalid_config/);
-  assert.equal(config.intervalMs,60000);assert.equal(bankConfig({...env,BANK_BASE_URL:'https://bank.example.org/'}).sourceKey,config.sourceKey);
+  for(const patch of [{BANK_ENABLED:'yes'},{BANK_BASE_URL:'http://bank.example.org'},{BANK_BASE_URL:'https://u:p@bank.example.org'},{BANK_BASE_URL:'https://bank.example.org/path'},{BANK_BASE_URL:'https://bank.example.org/?token=private'},{BANK_CHANNEL_ID:''},{DISCORD_GUILD_ID:'bad'}])assert.throws(()=>bankConfig({...env,...patch}),/bank_invalid_config/);
+  assert.equal(bankConfig({...env,BANK_BASE_URL:'https://bank.example.org/'}).sourceKey,config.sourceKey);
   assert.notEqual(bankConfig({...env,BANK_CHANNEL_ID:'900000000000000204'}).sourceKey,config.sourceKey);
+});
+
+test('Bank schedules 06:00 and 17:00 in Taiwan across UTC, day, month and leap-year boundaries',()=>{
+  for(const [from,to] of [
+    ['2026-10-23T05:59:59+08:00','2026-10-23T06:00:00+08:00'],
+    ['2026-10-23T06:00:00+08:00','2026-10-23T17:00:00+08:00'],
+    ['2026-10-23T08:59:59Z','2026-10-23T09:00:00Z'],
+    ['2026-10-31T17:00:00+08:00','2026-11-01T06:00:00+08:00'],
+    ['2026-12-31T23:00:00+08:00','2027-01-01T06:00:00+08:00'],
+    ['2028-02-28T17:00:00+08:00','2028-02-29T06:00:00+08:00'],
+  ])assert.equal(nextBankCheck(Date.parse(from)),Date.parse(to));
 });
 
 test('Bank uses stable IDs, Taiwan deadline dates and open status; future start is still announced',()=>{
@@ -66,6 +77,25 @@ function fixture() {
     discord:{verify:async()=>{},findSent:async()=>[],send:async()=>{posts++;return {id:messageId};}}};
   return {store,options,logs,rows:value=>{rows=value;},advance:ms=>{time+=ms;},posts:()=>posts,monitor:()=>new BankMonitor(options)};
 }
+
+test('Bank starts without a fetch, runs only at scheduled times and cancels its next timer on stop',async()=>{
+  const f=fixture(),jobs=[];
+  f.options.setTimer=(run,ms)=>{const job={run,ms,cancelled:false};jobs.push(job);return job;};
+  f.options.clearTimer=job=>{if(job)job.cancelled=true;};
+  const monitor=f.monitor();monitor.start();monitor.start();
+  assert.equal(jobs.length,1);assert.equal(jobs[0].ms,5*3600000);assert.equal(f.store.initialized,false);
+  f.advance(jobs[0].ms);await jobs[0].run();assert.equal(f.store.initialized,true);assert.equal(f.posts(),0);
+  assert.equal(jobs[1].ms,13*3600000);f.rows([raw(),raw(2)]);
+  f.advance(jobs[1].ms);await jobs[1].run();assert.equal(f.posts(),1);assert.equal(jobs[2].ms,11*3600000);
+  monitor.stop();assert.equal(jobs[2].cancelled,true);await jobs[2].run();assert.equal(jobs.length,3);assert.equal(f.posts(),1);
+  const disabled=new BankMonitor({env:{},setTimer:()=>{throw Error('disabled must not schedule');}});disabled.start();
+});
+
+test('a scheduled Bank scan drains all new open tasks beyond five without rereading the source',async()=>{
+  const f=fixture();await f.monitor().tick();f.rows(Array.from({length:9},(_,i)=>raw(i+1)));
+  const read=f.options.read;let reads=0;f.options.read=async()=>{reads++;return read();};
+  await f.monitor().tick();assert.equal(reads,1);assert.equal(f.posts(),8);
+});
 
 test('first snapshot suppresses history; new tasks send once across edits and monitor restarts',async()=>{
   const f=fixture();await f.monitor().tick();assert.equal(f.posts(),0);

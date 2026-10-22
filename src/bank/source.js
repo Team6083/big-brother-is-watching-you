@@ -6,10 +6,16 @@ export function bankConfig(env=process.env) {
   if(env.BANK_ENABLED!=='true')return {enabled:false};
   let url;
   try {url=new URL(env.BANK_BASE_URL);}catch{throw new Error('bank_invalid_config');}
-  const intervalMs=Number(env.BANK_INTERVAL_MS||60000),guildId=env.DISCORD_GUILD_ID,channelId=env.BANK_CHANNEL_ID;
+  const guildId=env.DISCORD_GUILD_ID,channelId=env.BANK_CHANNEL_ID;
   if(url.protocol!=='https:'||url.username||url.password||url.port||url.search||url.hash||url.pathname!=='/'||
-    ![guildId,channelId].every(id=>/^\d{17,20}$/.test(id||''))||!Number.isSafeInteger(intervalMs)||intervalMs<60000||intervalMs>3600000)throw new Error('bank_invalid_config');
-  return {enabled:true,baseUrl:url.origin,guildId,channelId,intervalMs,sourceKey:createHash('sha256').update(JSON.stringify([url.origin,guildId,channelId])).digest('hex')};
+    ![guildId,channelId].every(id=>/^\d{17,20}$/.test(id||'')))throw new Error('bank_invalid_config');
+  return {enabled:true,baseUrl:url.origin,guildId,channelId,sourceKey:createHash('sha256').update(JSON.stringify([url.origin,guildId,channelId])).digest('hex')};
+}
+
+export function nextBankCheck(now=Date.now()) {
+  const hour=3600000,local=new Date(now+8*hour);
+  const midnight=Date.UTC(local.getUTCFullYear(),local.getUTCMonth(),local.getUTCDate())-8*hour;
+  return [6,17,30].map(hours=>midnight+hours*hour).find(at=>at>now);
 }
 
 const validDate=value=>value===''||/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value+'T00:00:00Z'))&&new Date(value+'T00:00:00Z').toISOString().slice(0,10)===value;
