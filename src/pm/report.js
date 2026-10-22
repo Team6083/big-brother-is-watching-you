@@ -7,6 +7,8 @@ const stages = new Map([
 ]);
 const time = value => value ? Date.parse(value) : NaN;
 const clean = value => String(value || '').replace(/[\r\n`*<>\[\]]/g, ' ').replace(/@/g, '＠');
+// A malformed Discord metadata block on one card must not fail the whole scan.
+const metadata = (read, desc) => { try { return read(desc); } catch { return null; } };
 const cardUrl = value => /^https:\/\/trello\.com\/c\/[a-zA-Z0-9]{8}(?:\/[^\s]*)?$/.test(value || '') ? value : '';
 
 export function analyze(snapshot, { now = Date.now(), ignoredMembers = [], trustedProgressActions = [] } = {}) {
@@ -40,12 +42,13 @@ export function analyze(snapshot, { now = Date.now(), ignoredMembers = [], trust
     if (deadlinePhase === '1h') warnings.push('1 小時內到期');
     if (deadlinePhase === '24h') warnings.push('24 小時內到期');
     if (active && labels.includes('需要協助')) warnings.push('需要協助');
+    const owners = metadata(discordOwners, c.desc);
     const threadId = /CMSFTC_THREAD_ID\s*=\s*(\d{17,20})/.exec(c.desc || '')?.[1] || null;
     return {
       task_id: c.id, title: c.name, category: labels, status: list.name, stage,
-      owner: discordOwners(c.desc) || (c.idMembers || []).map(id => ({ id, name: members.get(id) || '尚未取得名稱' })),
-      discord_owner_ids: discordOwners(c.desc)?.map(o=>o.id) || [],
-      assigner: discordAssigner(c.desc),
+      owner: owners || (c.idMembers || []).map(id => ({ id, name: members.get(id) || '尚未取得名稱' })),
+      discord_owner_ids: owners?.map(o=>o.id) || [],
+      assigner: metadata(discordAssigner, c.desc),
       start_date: c.start || null, due_date: c.due || null, created_at: created, updated_at: c.dateLastActivity || null,
       last_progress_update: progress, discord_thread_id: threadId,
       discord_url: /https:\/\/discord\.com\/channels\/\d+\/\d+/.exec(c.desc || '')?.[0] || null,
