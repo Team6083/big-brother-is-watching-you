@@ -17,10 +17,10 @@ export class MongoDatabase {
   }
   async check() {
     const hello=await this.database.command({hello:1});
-    if(!hello.setName && hello.msg!=='isdbgrid')throw new Error('mongodb_replica_set_required');
+    if(!hello.setName && hello.msg!=='isdbgrid')throw new DatabaseFailure('mongodb_check_failed',{stage:'check',reason:'replica_set_required'});
     for(const [name,index] of [['proposals','_id_'],['task_creations','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_']]) {
       const indexes=await this.collection(name).listIndexes().toArray(),found=indexes.find(i=>i.name===index);
-      if(!found || (index!=='_id_'&&!found.unique) || index==='task_one_pending'&&found.partialFilterExpression?.state!=='pending')throw new Error('mongodb_indexes_missing');
+      if(!found || (index!=='_id_'&&!found.unique) || index==='task_one_pending'&&found.partialFilterExpression?.state!=='pending')throw new DatabaseFailure('mongodb_check_failed',{stage:'check',reason:'indexes_missing'});
     }
   }
   close() {return this.client.close();}
@@ -50,22 +50,18 @@ export async function openDatabase(env=process.env) {
 export async function migrate(db) {
   // The supplied database readWrite role can create these collections/indexes.
   // No admin command, collection validator, TTL or destructive migration is used.
-  let stage='list_collections',collection,index;
+  const progress={stage:'list_collections'};
+  const step=(stage,collection,index,run)=>{Object.assign(progress,{stage,collection,index});return run();};
   try {
     for(const name of collections) {
-      collection=name;stage='list_collections';
-      if(!(await db.database.listCollections({name},{nameOnly:true}).toArray()).length) {
-        stage='create_collection';
-        try {await db.database.createCollection(name);}catch(error){if(error.code!==48)throw error;}
+      if(!(await step('list_collections',name,undefined,()=>db.database.listCollections({name},{nameOnly:true}).toArray())).length) {
+        await step('create_collection',name,undefined,async()=>{try {await db.database.createCollection(name);}catch(error){if(error.code!==48)throw error;}});
       }
     }
     for(const [name,fields,options] of [
       ['proposals',{guild_id:1,forum_id:1,next_attempt_at:1,received_at:1},{name:'proposals_due'}],
       ['task_members',{guild_id:1,trello_id:1},{name:'member_trello_unique',unique:true}],
       ['task_changes',{card_id:1},{name:'task_one_pending',unique:true,partialFilterExpression:{state:'pending'}}],
-    ]) {
-      stage='create_index';collection=name;index=options.name;
-      await db.collection(name).createIndex(fields,options);
-    }
-  } catch(error) {throw new DatabaseFailure('mongodb_migration_failed',{stage,collection,index},error);}
+    ]) await step('create_index',name,options.name,()=>db.collection(name).createIndex(fields,options));
+  } catch(error) {throw new DatabaseFailure('mongodb_migration_failed',{...progress},error);}
 }

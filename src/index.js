@@ -9,6 +9,7 @@ import { createClient, createDiscordAdapter, registerEvents } from './discord.js
 import { sendProposal } from './webhook.js';
 import { Worker } from './worker.js';
 import { log } from './log.js';
+import { DatabaseFailure, databaseFailure } from './state/diagnostics.js';
 import { registerTaskInteractions } from './tasks/interactions.js';
 import {registerTeamTaskCreation} from './tasks/create-interactions.js';
 import { registerMeetings } from './meetings.js';
@@ -85,7 +86,8 @@ try {
     } catch { log('startup_failed', { code: 'forum_or_permission_check_failed' }); await shutdown(1); }
   });
   await client.login(config.token);
-} catch {
-  log('startup_failed', { code: 'configuration_database_or_login_failed' });
+} catch (error) {
+  const {event,code,...diagnostics}=databaseFailure(error);
+  log('startup_failed', { code: 'configuration_database_or_login_failed', ...(error instanceof DatabaseFailure?diagnostics:{}) });
   await shutdown(1);
 }

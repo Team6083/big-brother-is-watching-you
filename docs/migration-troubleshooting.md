@@ -10,6 +10,8 @@ npm run migrate
 
 成功時 stdout 仍輸出 `{"event":"schema_ready"}`，exit code 為 0。失敗時 stderr 輸出一行 JSON，exit code 為 1；不再只有事件名稱。
 
+`npm run check` 與啟動失敗（`startup_failed`）遇到資料庫錯誤時也使用同一組欄位（事件分別為 `configuration_or_database_failed`、`startup_failed`）。reason 的提示文字以輸出的 `hint` 為準，下表僅補充排查方向。
+
 以下只是權限不足的範例，不代表已判定正式環境的實際原因：
 
 ```json
@@ -36,7 +38,8 @@ npm run migrate
 | `list_collections` | 無法查詢程式需要的 collection 是否存在 |
 | `create_collection` | 建立缺少的 collection 失敗 |
 | `create_index` | 建立索引失敗，另有 `collection` 與 `index` |
-| `close` | 完成工作後關閉 client 失敗；仍以非零狀態結束 |
+| `check` | `npm run check`／啟動檢查發現非 replica set 或索引缺漏 |
+| `close` | 完成工作後關閉 client 失敗；若 migration 已成功，事件為 `migration_close_failed`（schema 已套用，仍以非零狀態結束） |
 
 若 migration 與關閉都失敗，優先保留原本 migration 的診斷，避免清理錯誤掩蓋主要原因。
 
@@ -56,8 +59,11 @@ npm run migrate
 | `tls_failed` | TLS、CA 掛載、憑證主機名稱及效期；不要關閉憑證驗證 |
 | `file_access_failed` | 執行權限及 CA 掛載路徑；日誌不輸出實際私密路徑 |
 | `server_selection_failed` | `replicaSet` 名稱、primary、節點公布的位址是否從容器可達；`topology_type` 可協助辨識 |
+| `unsupported_operation`／20 | 此操作不被目前環境允許；核對 MongoDB 版本、部署模式與目標 database |
 | `index_conflict`／85、86 | 管理員比對指定索引的 key、unique、partial filter 等規格，不要直接刪除 |
 | `duplicate_key`／11000 | 既有資料違反唯一索引；管理員先私下核對資料，不自動刪除／修改 |
+| `replica_set_required`、`indexes_missing` | 僅出現在 `npm run check`／啟動檢查（`stage=check`）；需 replica set，或先執行 `npm run migrate` |
+| `unexpected_error` | 非資料庫驅動錯誤（例如設定檔），輸出不含原始訊息；請核對其他環境設定 |
 | `mongodb_error` | 尚未分類的錯誤，依步驟、driver 類型及數字錯誤碼進一步查核 |
 
 錯誤碼與排查方向依 [MongoDB 錯誤碼](https://www.mongodb.com/docs/manual/reference/error-codes/) 與 [Node.js driver 連線排查](https://www.mongodb.com/docs/drivers/node/current/connect/connection-troubleshooting/) 整理；提示是排查方向，不是對環境的直接診斷。

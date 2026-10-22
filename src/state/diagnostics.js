@@ -22,6 +22,9 @@ const hints={
   tls_failed:'請檢查 TLS、CA 掛載、憑證效期與主機名稱；不要關閉憑證驗證。',
   file_access_failed:'請檢查程序的檔案／網路存取權限，以及掛載的 CA 檔案。',
   server_selection_failed:'請檢查 replicaSet 名稱、primary 狀態，以及容器能否連上各節點公布的位址。',
+  replica_set_required:'MongoDB 必須是 replica set 或 sharded cluster，才支援交易。',
+  indexes_missing:'必要索引缺漏或規格不符；請先執行 npm run migrate。',
+  unexpected_error:'非資料庫驅動錯誤；請檢查其他環境設定（例如 Discord 設定），此輸出不含原始訊息。',
   mongodb_error:'請依失敗步驟與 MongoDB 錯誤碼核對資料庫權限、版本及設定。',
 };
 const mongoCodes=new Map([
@@ -37,28 +40,31 @@ const systemCodes=new Map([
   ...['DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY','CERT_HAS_EXPIRED','CERT_NOT_YET_VALID','ERR_TLS_CERT_ALTNAME_INVALID','ERR_TLS_HANDSHAKE_TIMEOUT','ERR_SSL_WRONG_VERSION_NUMBER','ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR'].map(code=>[code,'tls_failed']),
 ]);
 const driverNames=new Set(['MongoServerError','MongoServerSelectionError','MongoNetworkError','MongoNetworkTimeoutError','MongoOperationTimeoutError','MongoParseError','MongoInvalidArgumentError','MongoAPIError','MongoRuntimeError','MongoCompatibilityError','MongoMissingCredentialsError','MongoTopologyClosedError','MongoServerClosedError']);
-const stages=new Set(['configuration','connect','ping','list_collections','create_collection','create_index','close']);
+const stages=new Set(['configuration','connect','ping','list_collections','create_collection','create_index','check','close']);
 const topologies=new Set(['Unknown','Single','ReplicaSetNoPrimary','ReplicaSetWithPrimary','Sharded','LoadBalanced']);
 
-export function migrationFailure(error) {
+export function databaseFailure(error,event='migration_failed') {
   const context=error instanceof DatabaseFailure?error.context:{};
-  const nodes=[],pending=[error],seen=new Set();
+  const nodes=[],pending=[error],seen=new Set(),responses=new Set();
   while(pending.length&&nodes.length<32) {
     const node=pending.shift();
     if(!node||typeof node!=='object'||seen.has(node))continue;
     seen.add(node);nodes.push(node);
     pending.push(node.cause,node.errorResponse,node.reason);
+    if(node.errorResponse&&typeof node.errorResponse==='object')responses.add(node.errorResponse);
     if(node.reason?.servers instanceof Map)for(const server of [...node.reason.servers.values()].slice(0,8))pending.push(server.error);
     if(Array.isArray(node.errors))pending.push(...node.errors.slice(0,8));
   }
-  const mongo=nodes.find(n=>Number.isInteger(n.code)&&n.code>=0&&n.code<=2147483647),system=nodes.find(n=>systemCodes.has(n.code));
+  // Only server replies carry MongoDB numeric codes; other `code` fields are unrelated.
+  const mongo=nodes.find(n=>Number.isInteger(n.code)&&n.code>=0&&n.code<=2147483647&&(n.name==='MongoServerError'||responses.has(n))),system=nodes.find(n=>systemCodes.has(n.code));
   const driver=nodes.find(n=>driverNames.has(n.name)),topology=nodes.find(n=>topologies.has(n.type));
   const known=mongoCodes.get(mongo?.code);
   const reason=Object.hasOwn(hints,context.reason)?context.reason:known?.[1]||systemCodes.get(system?.code)||
-    (driver?.name==='MongoServerSelectionError'?'server_selection_failed':/Timeout/.test(driver?.name||'')?'timeout':'mongodb_error');
-  return {event:'migration_failed',code:error instanceof DatabaseFailure?error.message:'mongodb_migration_failed',
+    (driver?.name==='MongoServerSelectionError'?'server_selection_failed':/Timeout/.test(driver?.name||'')?'timeout':driver||mongo?'mongodb_error':'unexpected_error');
+  return {event,code:error instanceof DatabaseFailure?error.message:driver||mongo?'mongodb_error':'unexpected_error',
     stage:stages.has(context.stage)?context.stage:'unknown',
     ...(context.collection?{collection:context.collection}:{}),...(context.index?{index:context.index}:{}),reason,
     ...(driver?{driver_error:driver.name}:{}),...(mongo?{mongo_code:mongo.code}:{}),...(known?{mongo_code_name:known[0]}:{}),
     ...(system?{system_code:system.code}:{}),...(topology?{topology_type:topology.type}:{}),hint:hints[reason]};
 }
+export const migrationFailure=error=>databaseFailure(error);

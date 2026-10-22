@@ -36,7 +36,7 @@ test('nested topology errors report DNS, connection, TLS and timeout codes witho
 test('unknown errors retain numeric MongoDB codes but never arbitrary messages, names, string codes or payloads',()=>{
   const error=failure(secret,{code:secret,codeName:secret,stack:privateUri,reason:{type:secret},errorResponse:{code:12345,codeName:secret,errmsg:privateUri}});
   const output=migrationFailure(error);
-  assert.equal(output.code,'mongodb_migration_failed');assert.equal(output.stage,'unknown');assert.equal(output.mongo_code,12345);assert.equal(output.reason,'mongodb_error');
+  assert.equal(output.code,'mongodb_error');assert.equal(output.stage,'unknown');assert.equal(output.mongo_code,12345);assert.equal(output.reason,'mongodb_error');
   assert.ok(!JSON.stringify(output).includes(secret));assert.equal(output.driver_error,undefined);assert.equal(output.system_code,undefined);
   const cycle=failure('MongoServerSelectionError');cycle.cause=cycle;
   assert.equal(report(cycle).reason,'server_selection_failed');
@@ -73,4 +73,23 @@ test('actual migration CLI returns one safe JSON failure and a nonzero exit stat
     const output=JSON.parse(lines[0]);assert.equal(output.event,'migration_failed');assert.equal(output.stage,'configuration');assert.ok(output.hint);
     assert.ok(!result.stderr.includes(secret));assert.ok(!result.stderr.includes('private.invalid'));assert.ok(!result.stderr.includes('private_auth'));
   }
+});
+
+test('non-driver errors are not labelled as MongoDB failures and unrelated codes are ignored',()=>{
+  const output=migrationFailure(failure('Error',{code:42}));
+  assert.equal(output.code,'unexpected_error');assert.equal(output.reason,'unexpected_error');assert.equal(output.mongo_code,undefined);
+  const nested=report(failure('MongoServerError',{code:13,cause:failure('Error',{code:7})}));assert.equal(nested.mongo_code,13);
+});
+
+test('migration CLI reports a close failure separately from a failed migration',()=>{
+  const result=spawnSync(process.execPath,['--input-type=module','-e',`
+    import {databaseFailure,DatabaseFailure} from './src/state/diagnostics.js';
+    console.log(JSON.stringify(databaseFailure(new DatabaseFailure('mongodb_close_failed',{stage:'close'}),'migration_close_failed')));`],{cwd:fileURLToPath(new URL('../',import.meta.url)),encoding:'utf8'});
+  const output=JSON.parse(result.stdout);assert.equal(output.event,'migration_close_failed');assert.equal(output.stage,'close');
+});
+
+test('check CLI reuses the safe diagnostics',()=>{
+  const result=spawnSync(process.execPath,['src/check.js'],{cwd:fileURLToPath(new URL('../',import.meta.url)),env:{...process.env,MONGODB_URI:privateUri.replace('/private_database?','/test?')},encoding:'utf8',timeout:15000});
+  assert.equal(result.status,1);const output=JSON.parse(result.stderr.trim());
+  assert.equal(output.event,'configuration_or_database_failed');assert.ok(output.reason);assert.ok(!result.stderr.includes(secret));
 });
