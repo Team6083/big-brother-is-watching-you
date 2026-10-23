@@ -1,18 +1,20 @@
-import {meetingTimes,meetingEnd,recordDate,recordLink} from '../meetings.js';
+import {meetingTimes,meetingEnd,checkMeetingEdit,recordDate,recordLink} from '../meetings.js';
 
 const dateOf=ms=>new Date(ms+8*3600000).toISOString().slice(0,10);
 export class MongoMeetingStore {
   constructor(db) {this.db=db;this.rows=db.collection('meetings');this.dates=db.collection('meeting_dates');this.records=db.collection('meeting_records');}
   async get(id) {return await this.rows.findOne({_id:id})??undefined;}
   async recoverSending(channel) {await this.rows.updateOne({_id:channel,status:'sending'},{$set:{status:'uncertain'}});}
-  async set(id,date,time,actor,location,now=Date.now(),endTime) {
+  async set(id,date,time,actor,location,now=Date.now(),endTime,previous) {
     location=location?.trim();
     if(!location || location.length>200 || /[\r\n]/.test(location))throw new Error('請填入會議地點（單行，最多 200 字）。');
-    const {starts,remind}=meetingTimes(date,time,now),ends=meetingEnd(date,time,endTime);
+    const ends=meetingEnd(date,time,endTime);
     return this.db.transaction(async session=>{
       const old=await this.rows.findOne({_id:id},{session});
       if(old?.status==='sending')throw new Error('提醒正在發送，請稍後再修改。');
-      const same=old?.starts_at===starts&&old.status!=='cancelled';
+      checkMeetingEdit(previous,old);
+      const {starts,remind}=meetingTimes(date,time,now,old);
+      const same=old?.remind_at===remind&&['pending','sent','uncertain'].includes(old.status);
       const row={_id:id,channel_id:id,starts_at:starts,remind_at:remind,actor_id:actor,location,ends_at:ends,
         status:same?old.status:'pending',message_id:same?old.message_id:null,attempts:same?old.attempts:0};
       await this.rows.replaceOne({_id:id},row,{upsert:true,session});

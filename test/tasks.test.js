@@ -353,6 +353,18 @@ test('retired progress buttons direct users to status updates without accessing 
  }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
 });
 
+test('task command in allowed captain or cadre text channels explains how to create a task without reading Trello',async()=>{
+ const saved={...process.env},f=fixture();let handler,reply;
+ Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
+ try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{});
+ for(const id of process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')) {
+  await handler({commandName:'任務',isChatInputCommand:()=>true,isAutocomplete:()=>false,
+   channel:{id,guildId:guild,type:0},user:{id:person,bot:false},reply:async p=>{reply=p;}});
+  assert.match(reply.content,/\/建立任務/);assert.match(reply.content,/討論串/);assert.equal(reply.flags,64);assert.equal(f.writes.length,0);
+ }
+ }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
+});
+
 test('task view shows complete description, people, dates and latest status without unsafe mentions',()=>{
  const f=fixture();try{fullEdit(f);f.card.name='任務';f.card.start='2026-10-03T16:00:00Z';f.card.due='2026-10-05T15:59:00Z';
  const desc='工作內容：\n'+ 'a'.repeat(3800)+'\n@everyone';f.card.desc=withTaskDescription(f.card.desc,desc);
