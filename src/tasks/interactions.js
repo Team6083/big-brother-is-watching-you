@@ -8,7 +8,7 @@ import {MongoTaskStore} from '../state/tasks.js';
 import { TaskStore } from './store.js';
 import { taskConfig, trelloTasks } from './trello.js';
 import { TaskService } from './service.js';
-import { isTaskThread } from './scope.js';
+import { isTaskThread, isTeamTaskChannel } from './scope.js';
 import {createTaskCommand} from './create-ui.js';
 
 export const taskCommands = [
@@ -152,6 +152,8 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
     active++;
     try {
       const channel=i.channel;
+      if(command && !i.user.bot && isTeamTaskChannel(channel,config))return await i.reply({flags:MessageFlags.Ephemeral,
+        content:'新增工作請在此頻道使用 /建立任務。建立後，到 Bot 開的任務討論串使用 /任務 查看或修改狀態。',allowedMentions:{parse:[]}});
       if(!isTaskThread(channel,config) || i.user.bot)throw new Error('task_outside_forum');
       const member=i.member;
       const permissions=channel.permissionsFor(member);

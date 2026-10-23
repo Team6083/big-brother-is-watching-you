@@ -54,6 +54,15 @@ test('changed meeting replaces prior schedule; submitting same meeting does not 
   assert.equal(store.set(meetingChannelId,'2026-10-18','14:30','actor','機器人教室',now).status,'sent');
   assert.equal(store.set(meetingChannelId,'2026-10-20','15:00','actor','機器人教室',now).status,'pending');db.close();
 });
+
+test('an existing future meeting can change time after its reminder without resetting the receipt or sending twice',async()=>{
+  const {db,store,reminder}=fixture();await reminder.tick();
+  const edited=store.set(meetingChannelId,'2026-10-18','16:00','actor','線上會議',Date.parse('2026-10-17T19:00:00+08:00'),'17:30');
+  assert.equal(edited.starts_at,Date.parse('2026-10-18T16:00:00+08:00'));assert.equal(edited.status,'sent');assert.equal(edited.message_id,'notice');
+  reminder.send=()=>assert.fail('must not resend an already sent reminder');await reminder.tick();
+  assert.throws(()=>store.set(meetingChannelId,'2026-10-19','16:00','actor','Room',Date.parse('2026-10-18T19:00:00+08:00'),'17:30'),/已過前一天/);
+  db.close();
+});
 test('ambiguous Discord failure is persisted and never automatically resent',async()=>{
   let count=0;const {db,store,reminder}=fixture(async()=>{count++;throw new Error('timeout');});
   await reminder.tick();await reminder.tick();assert.equal(count,1);assert.equal(store.get(meetingChannelId).status,'uncertain');db.close();

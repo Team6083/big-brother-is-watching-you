@@ -114,6 +114,20 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await assert.rejects(db.transaction(async session=>{await db.collection('meeting_dates').insertOne({_id:'rollback',channel_id:meetingChannelId,meeting_date:'2026-10-30'},{session});throw new Error('rollback');}));
     assert.equal(await db.collection('meeting_dates').findOne({_id:'rollback'}),null);
   });
+  await t.test('meeting edits after the reminder keep MongoDB receipts and rescheduling updates the date transactionally',async()=>{
+    const id='900000000000000188',initial=Date.parse('2026-10-23T10:00:00+08:00'),editAt=Date.parse('2026-10-25T19:00:00+08:00');
+    await meetings.set(id,'2026-10-26','16:00',actor,'Room',initial,'17:30');
+    const claimed=await meetings.claim(await meetings.get(id));await meetings.markSent(claimed,actor);
+    await meetings.set(id,'2026-10-26','19:00',actor,'New room',editAt,'20:30');
+    const edited=await new MongoMeetingStore(db).get(id);
+    assert.equal(edited.starts_at,Date.parse('2026-10-26T19:00:00+08:00'));assert.equal(edited.status,'sent');assert.equal(edited.message_id,actor);
+    assert.deepEqual(await meetings.recordDates(id),['2026-10-26']);
+    await assert.rejects(meetings.set(id,'2026-10-26','18:00',actor,'Stale edit',editAt,'20:30',claimed),/會議資料已變更/);
+    assert.equal((await meetings.get(id)).location,'New room');
+    const moved=await meetings.set(id,'2026-10-27','19:00',actor,'New room',editAt,'20:30');
+    assert.equal(moved.status,'pending');assert.equal(moved.message_id,null);assert.equal(moved.remind_at,Date.parse('2026-10-26T17:00:00+08:00'));
+    assert.deepEqual(await meetings.recordDates(id),['2026-10-27']);
+  });
   await t.test('meeting notices send once; uncertain sends survive reconnect',async()=>{
     await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');let sent=0;
     const reminder=new MeetingReminder({store:meetings,verify:async()=>{},send:async p=>{sent++;assert.match(p.content,/20:30/);return {id:actor};},now:()=>Date.parse('2026-10-19T17:00:00+08:00'),log:()=>{}});
