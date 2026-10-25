@@ -36,7 +36,8 @@ test('record is included in the scheduled reminder and retained after cancellati
 });
 test('Discord records use only existing dates, keep results private and reject forged choices',async()=>{
   const db=new DatabaseSync(':memory:');let handler;
-  registerMeetings({on:(_,fn)=>{handler=fn;}},{db},{guildId:'guild'},()=>{});
+  const verifiedChannel={guildId:'guild',type:0,permissionsFor:()=>({has:()=>true}),guild:{roles:{fetch:async()=>({mentionable:true})}}};
+  registerMeetings({on:(_,fn)=>{handler=fn;},channels:{fetch:async()=>verifiedChannel},user:{}},{db},{guildId:'guild'},()=>{});
   async function run({command,action,values,fields,channel=meetingChannelId,id='draft',actor='actor'}) {
     let result,modal;const i={id,isChatInputCommand:()=>!!command,commandName:command,customId:action,guildId:'guild',channelId:channel,user:{id:actor},values,fields,
       isButton:()=>!!action&&!values&&!fields,isStringSelectMenu:()=>!!values,isModalSubmit:()=>!!fields,
@@ -51,7 +52,8 @@ test('Discord records use only existing dates, keep results private and reject f
   assert.match((await run({action:'meeting:record_date:draft',values:['2026-10-01']})).result.content,/尚未登錄/);
   assert.match((await run({action:'meeting:record_date:draft',values:['2026-10-02']})).result.content,/重新選擇/);
   assert.match((await run({action:'meeting:record_date:draft',values:['2026-10-01'],actor:'other'})).result.content,/不屬於你/);
-  await run({command:'會議記錄設定',id:'set'});
+  await run({command:'會議設定',id:'set'});
+  await run({action:'meeting:record_history:set'});
   assert.ok((await run({action:'meeting:record_date:set',values:['2026-10-01']})).modal);
   assert.ok((await run({action:'meeting:record_submit:set',fields:{getTextInputValue:()=>link}})).result.content.includes(link));
   await run({command:'查看會議記錄'});

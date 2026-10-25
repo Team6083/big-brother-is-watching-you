@@ -128,6 +128,23 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     assert.equal(moved.status,'pending');assert.equal(moved.message_id,null);assert.equal(moved.remind_at,Date.parse('2026-10-26T17:00:00+08:00'));
     assert.deepEqual(await meetings.recordDates(id),['2026-10-27']);
   });
+  await t.test('combined MongoDB meeting and record saves roll back together; cancellation preserves history and rejects stale edits',async()=>{
+    const id='900000000000000187',at=Date.parse('2026-10-25T10:00:00+08:00');
+    const combined=new MongoMeetingStore(db),row=await combined.set(id,'2026-10-27','16:00',actor,'Room',at,'17:30',undefined,'https://example.org/first');
+    assert.equal((await combined.record(id,'2026-10-27')).url,'https://example.org/first');
+    const update=combined.records.updateOne;
+    combined.records.updateOne=async()=>{throw Error('synthetic record failure');};
+    try{await assert.rejects(combined.set(id,'2026-10-28','16:00',actor,'Changed',at,'17:30',row,'https://example.org/new'),/synthetic record failure/);}
+    finally{combined.records.updateOne=update;}
+    assert.deepEqual(await combined.get(id),row);assert.deepEqual(await combined.recordDates(id),['2026-10-27']);
+    assert.equal(await combined.record(id,'2026-10-28'),undefined);
+    const moved=await combined.set(id,'2026-10-28','16:00',actor,'Changed',at,'17:30',row,'https://example.org/new');
+    await assert.rejects(combined.cancel(id,at,row),/會議資料已變更/);
+    await combined.claim(moved);await assert.rejects(combined.cancel(id,at,moved),/提醒正在發送/);
+    await combined.recoverSending(id);await combined.cancel(id,at,moved);
+    assert.equal((await combined.get(id)).status,'cancelled');assert.deepEqual(await combined.recordDates(id),['2026-10-28','2026-10-27']);
+    await combined.setRecord(id,'2026-10-28','',actor);assert.equal(await combined.record(id,'2026-10-28'),undefined);
+  });
   await t.test('meeting notices send once; uncertain sends survive reconnect',async()=>{
     await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');let sent=0;
     const reminder=new MeetingReminder({store:meetings,verify:async()=>{},send:async p=>{sent++;assert.match(p.content,/20:30/);return {id:actor};},now:()=>Date.parse('2026-10-19T17:00:00+08:00'),log:()=>{}});

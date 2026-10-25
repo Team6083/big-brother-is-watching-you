@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {dateOptions,dateControls,timeModal,selectedTimes,previewControls} from '../src/meetings-ui.js';
-import {MeetingStore,meetingEnd,meetingChannelId,registerMeetings,meetingSummary,MeetingReminder} from '../src/meetings.js';
+import {MeetingStore,meetingEnd,meetingChannelId,meetingCommands,registerMeetings,meetingSummary,MeetingReminder} from '../src/meetings.js';
 
 test('date choices paginate across month and year, only upcoming reminder dates',()=>{
   const now=Date.parse('2026-12-31T16:59:00+08:00');
@@ -125,4 +125,59 @@ test('editing an already reminded future meeting preserves its receipt and warns
   const saved=await run({action:'meeting:save:edit'}),row=store.get(meetingChannelId);
   assert.equal(row.starts_at,Date.parse('2026-10-26T19:00:00+08:00'));assert.equal(row.status,'sent');assert.equal(row.message_id,'old_notice');
   assert.match(saved.result.content,/不會重發或更新原提醒/);db.close();
+});
+
+test('meeting setup includes a draft record link and only commits it with the meeting',async()=>{
+  const now=Date.parse('2026-10-25T10:00:00+08:00'),{db,run,fields}=harness(()=>now),store=new MeetingStore(db);
+  assert.deepEqual(meetingCommands.map(c=>c.name),['會議設定','會議查看','查看會議記錄']);
+  await run({command:'會議設定'});await run({action:'meeting:date:draft',values:['2026-10-27']});
+  const preview=await run({action:'meeting:times:draft',fields:fields()});
+  assert.ok(preview.result.components[0].toJSON().components.some(c=>c.label==='會議記錄連結'));
+  const modal=await run({action:'meeting:record_link:draft'});assert.equal(modal.modal.components[0].component.required,false);
+  await run({action:'meeting:record_draft:draft',fields:{getTextInputValue:()=> 'https://example.org/notes'}});
+  assert.equal(store.record(meetingChannelId,'2026-10-27'),undefined);assert.equal(store.get(meetingChannelId),undefined);
+  await run({action:'meeting:save:draft'});assert.equal(store.record(meetingChannelId,'2026-10-27').url,'https://example.org/notes');db.close();
+});
+
+test('cancel meeting lives in editing and needs confirmation; cancelling the edit keeps the meeting and record',async()=>{
+  const now=Date.parse('2026-10-25T10:00:00+08:00'),{db,run}=harness(()=>now),store=new MeetingStore(db);
+  const original=store.set(meetingChannelId,'2026-10-27','16:00','actor','Room',now,'17:30');store.setRecord(meetingChannelId,'2026-10-27','https://example.org/notes','actor');
+  const edit=await run({action:'meeting:open_edit',id:'edit'});
+  assert.ok(edit.result.components.flatMap(r=>r.toJSON().components).some(c=>c.label==='取消會議'));
+  await run({action:'meeting:cancel:edit'});assert.deepEqual(store.get(meetingChannelId),original);
+  await run({action:'meeting:keep:edit'});assert.deepEqual(store.get(meetingChannelId),original);
+  await run({action:'meeting:cancel:edit'});
+  const foreign=await run({action:'meeting:confirm_cancel:edit',user:'other'});assert.match(foreign.result.content,/不屬於你/);
+  await run({action:'meeting:confirm_cancel:edit'});assert.equal(store.get(meetingChannelId).status,'cancelled');
+  assert.equal(store.record(meetingChannelId,'2026-10-27').url,'https://example.org/notes');db.close();
+});
+
+test('combined meeting and record save rolls back both the meeting and date when record write fails',()=>{
+  const now=Date.parse('2026-10-25T10:00:00+08:00'),db=new DatabaseSync(':memory:'),store=new MeetingStore(db);
+  db.exec("CREATE TRIGGER reject_record BEFORE INSERT ON meeting_records BEGIN SELECT RAISE(ABORT,'synthetic failure'); END");
+  assert.throws(()=>store.set(meetingChannelId,'2026-10-27','16:00','actor','Room',now,'17:30',undefined,'https://example.org/notes'));
+  assert.equal(store.get(meetingChannelId),undefined);assert.deepEqual(store.recordDates(meetingChannelId),[]);db.close();
+});
+
+test('discarded or invalid record drafts do not write, and an explicit empty link clears only that date',async()=>{
+  const now=Date.parse('2026-10-25T10:00:00+08:00'),{db,run}=harness(()=>now),store=new MeetingStore(db);
+  store.set(meetingChannelId,'2026-10-27','16:00','actor','Room',now,'17:30');store.setRecord(meetingChannelId,'2026-10-27','https://example.org/old','actor');
+  store.setRecord(meetingChannelId,'2026-10-01','https://example.org/history','actor');
+  await run({action:'meeting:open_edit',id:'edit'});
+  const invalid=await run({action:'meeting:record_draft:edit',fields:{getTextInputValue:()=> 'http://example.org/invalid'}});assert.match(invalid.result.content,/HTTPS/);
+  await run({action:'meeting:record_draft:edit',fields:{getTextInputValue:()=> 'https://example.org/discarded'}});
+  await run({action:'meeting:discard:edit'});assert.equal(store.record(meetingChannelId,'2026-10-27').url,'https://example.org/old');
+  await run({action:'meeting:open_edit',id:'clear'});await run({action:'meeting:record_draft:clear',fields:{getTextInputValue:()=> ''}});await run({action:'meeting:save:clear'});
+  assert.equal(store.record(meetingChannelId,'2026-10-27'),undefined);assert.equal(store.record(meetingChannelId,'2026-10-01').url,'https://example.org/history');db.close();
+});
+
+test('a stale cancellation form cannot cancel a revised meeting and pending links cannot override separately updated records',async()=>{
+  const now=Date.parse('2026-10-25T10:00:00+08:00'),{db,run}=harness(()=>now),store=new MeetingStore(db);
+  store.set(meetingChannelId,'2026-10-27','16:00','actor','Room',now,'17:30');store.setRecord(meetingChannelId,'2026-10-27','https://example.org/old','actor');
+  await run({action:'meeting:open_edit',id:'edit'});
+  store.setRecord(meetingChannelId,'2026-10-27','https://example.org/revised','other');
+  await run({action:'meeting:save:edit'});assert.equal(store.record(meetingChannelId,'2026-10-27').url,'https://example.org/revised');
+  await run({action:'meeting:open_edit',id:'cancel'});await run({action:'meeting:cancel:cancel'});
+  store.set(meetingChannelId,'2026-10-27','18:00','other','New room',now,'19:30');
+  const rejected=await run({action:'meeting:confirm_cancel:cancel'});assert.match(rejected.result.content,/資料已變更/);assert.equal(store.get(meetingChannelId).status,'pending');db.close();
 });

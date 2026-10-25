@@ -5,10 +5,11 @@ export class MongoMeetingStore {
   constructor(db) {this.db=db;this.rows=db.collection('meetings');this.dates=db.collection('meeting_dates');this.records=db.collection('meeting_records');}
   async get(id) {return await this.rows.findOne({_id:id})??undefined;}
   async recoverSending(channel) {await this.rows.updateOne({_id:channel,status:'sending'},{$set:{status:'uncertain'}});}
-  async set(id,date,time,actor,location,now=Date.now(),endTime,previous) {
+  async set(id,date,time,actor,location,now=Date.now(),endTime,previous,recordUrl) {
     location=location?.trim();
     if(!location || location.length>200 || /[\r\n]/.test(location))throw new Error('請填入會議地點（單行，最多 200 字）。');
     const ends=meetingEnd(date,time,endTime);
+    if(recordUrl!==undefined&&recordUrl!=='')recordUrl=recordLink(recordUrl);
     return this.db.transaction(async session=>{
       const old=await this.rows.findOne({_id:id},{session});
       if(old?.status==='sending')throw new Error('提醒正在發送，請稍後再修改。');
@@ -20,14 +21,18 @@ export class MongoMeetingStore {
       await this.rows.replaceOne({_id:id},row,{upsert:true,session});
       if(old && old.starts_at>now && dateOf(old.starts_at)!==date)await this.dates.deleteOne({_id:id+':'+dateOf(old.starts_at)},{session});
       await this.dates.updateOne({_id:id+':'+date},{$setOnInsert:{channel_id:id,meeting_date:date}},{upsert:true,session});
+      if(recordUrl==='')await this.records.deleteOne({_id:id+':'+date},{session});
+      else if(recordUrl!==undefined)await this.records.updateOne({_id:id+':'+date},{$set:{channel_id:id,meeting_date:date,url:recordUrl,actor_id:actor,updated_at:now}},{upsert:true,session});
       return row;
     });
   }
-  async cancel(id,now=Date.now()) {
+  async cancel(id,now=Date.now(),previous) {
     return this.db.transaction(async session=>{
       const old=await this.rows.findOne({_id:id},{session});
+      checkMeetingEdit(previous,old);
       if(!old)return 0;
       if(old.status==='sending')throw new Error('提醒正在發送，請稍後再操作。');
+      if(previous&&old.starts_at<=now)throw new Error('會議時間已過，請重新查看會議。');
       await this.rows.updateOne({_id:id},{$set:{status:'cancelled'}},{session});
       if(old.starts_at>now)await this.dates.deleteOne({_id:id+':'+dateOf(old.starts_at)},{session});
       return 1;
@@ -38,7 +43,9 @@ export class MongoMeetingStore {
     return [...new Set([...dates,...records])].sort().reverse();
   }
   async setRecord(channel,date,url,actor) {
-    const valid=recordDate(date),link=recordLink(url);
+    const valid=recordDate(date);
+    if(url===''){await this.records.deleteOne({_id:channel+':'+valid});return;}
+    const link=recordLink(url);
     await this.records.updateOne({_id:channel+':'+valid},{$set:{channel_id:channel,meeting_date:valid,url:link,actor_id:actor,updated_at:Date.now()}},{upsert:true});
     return this.record(channel,valid);
   }
