@@ -191,7 +191,7 @@ export function registerMeetings(client,proposalStore,config,log) {
           return await i.editReply({content:'請選擇會議日期（只列出已設定的會議及已有記錄的日期）。',components:recordControls(i.id,dates),allowedMentions:{parse:[]}});
         }
         if(i.commandName==='會議取消') {
-        if(await store.get(meetingChannelId)?.status==='sending')throw new Error('提醒正在發送，請稍後再操作。');
+        if((await store.get(meetingChannelId))?.status==='sending')throw new Error('提醒正在發送，請稍後再操作。');
         await store.cancel(meetingChannelId);
         await i.editReply({content:'已取消會議提醒；已發出的訊息會保留。',allowedMentions:{parse:[]}});
         } else {
