@@ -183,8 +183,9 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
       create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://trello.com/c/example2',closed:false});throw Error('task_trello_unconfirmed');}};
     const discord={createThread:async()=>{threads++;return {id:teamThread,guildId:guild,parentId:parent,type:11};},notify:async()=>{pings++;return {id:actor};}};
     const service=new TaskCreationService({store:creation,trello,discord,authorize:async()=>{}});
-    const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:actor,status:list,due:'2026-10-20'}};
+    const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:[actor,'900000000000000122'],status:list,due:'2026-10-20'}};
     await assert.rejects(service.create(op));assert.equal((await creation.get(operation)).state,'card_pending');assert.equal(pings,0);
+    assert.deepEqual((await new MongoCreationStore(db).get(operation)).input.assigner,op.input.assigner);
     const restarted=new TaskCreationService({...service,store:new MongoCreationStore(db)});
     await Promise.all([restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor}),restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor})]);
     assert.equal(writes,1);assert.equal(threads,1);assert.equal(pings,1);

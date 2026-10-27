@@ -1,4 +1,5 @@
 import {ActionRowBuilder,ButtonBuilder,ButtonStyle,LabelBuilder,ModalBuilder,SlashCommandBuilder,StringSelectMenuBuilder,TextInputBuilder,TextInputStyle,UserSelectMenuBuilder} from 'discord.js';
+import {assigneeIds} from './owners.js';
 
 export const createTaskCommand=new SlashCommandBuilder().setName('建立任務').setDescription('在隊長／幹部頻道建立任務；人員、日期與狀態用選的')
   .addStringOption(o=>o.setName('核對編號').setDescription('僅核對先前結果不明的建立操作，不會再次建卡').setRequired(false));
@@ -16,7 +17,7 @@ export function createTaskModal(id,draft) {
     text('title','任務名稱',100,TextInputStyle.Short,draft.input?.title||'新任務'),
     text('description','任務描述：工作內容、完成標準、參考資料',4000,TextInputStyle.Paragraph,draft.input?.description||taskTemplate),
     new LabelBuilder().setLabel('Owner（任務負責人，最多 5 位）').setUserSelectMenuComponent(owners),
-    new LabelBuilder().setLabel('Assignee（被指派的人）').setUserSelectMenuComponent(new UserSelectMenuBuilder().setCustomId('assignee').setMinValues(1).setMaxValues(1).setRequired(true).setDefaultUsers(draft.input?.assigner||draft.actor)),
+    new LabelBuilder().setLabel('Assignee（被指派的人，最多 5 位）').setUserSelectMenuComponent(new UserSelectMenuBuilder().setCustomId('assignee').setMinValues(1).setMaxValues(5).setRequired(true).setDefaultUsers(assigneeIds(draft.input?.assigner||draft.actor))),
     new LabelBuilder().setLabel('狀態').setStringSelectMenuComponent(new StringSelectMenuBuilder().setCustomId('status').setMinValues(1).setMaxValues(1).setRequired(true)
       .addOptions(draft.lists.map(l=>({label:l.name.slice(0,100),value:l.id,default:l.id===draft.input?.status})))),
   );
@@ -25,7 +26,7 @@ export function createTaskModal(id,draft) {
 export function createTaskPreview(id,draft) {
   const input=draft.input;
   return {content:'【建立任務預覽｜尚未建立】\n'+safeTaskText(input.title)+'\nOwner：'+input.ids.map(v=>'<@'+v+'>').join(' ')+
-    '\nAssignee：<@'+input.assigner+'>\n開始：'+(input.start||'未設定')+'｜截止：'+(input.due||'未設定')+
+    '\nAssignee：'+assigneeIds(input.assigner).map(v=>'<@'+v+'>').join(' ')+'\n開始：'+(input.start||'未設定')+'｜截止：'+(input.due||'未設定')+
     '\n狀態：'+safeTaskText(draft.lists.find(l=>l.id===input.status)?.name)+'\n日期採台灣時間；截止為當日 23:59。',
     embeds:[{description:safeTaskText(input.description)}],components:[row(
       button('start',id,'選擇開始日期'),button('due',id,'選擇截止日期'),button('edit',id,'修改內容／人員／狀態'),

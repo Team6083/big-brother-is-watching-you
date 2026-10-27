@@ -16,14 +16,15 @@ test('Bank is disabled by default and validates explicit feature configuration',
   assert.notEqual(bankConfig({...env,BANK_CHANNEL_ID:'900000000000000204'}).sourceKey,config.sourceKey);
 });
 
-test('Bank schedules 06:00 and 17:00 in Taiwan across UTC, day, month and leap-year boundaries',()=>{
+test('Bank schedules the next whole hour across UTC, day, month and leap-year boundaries',()=>{
   for(const [from,to] of [
     ['2026-10-23T05:59:59+08:00','2026-10-23T06:00:00+08:00'],
-    ['2026-10-23T06:00:00+08:00','2026-10-23T17:00:00+08:00'],
+    ['2026-10-23T06:00:00+08:00','2026-10-23T07:00:00+08:00'],
+    ['2026-10-23T06:00:00.001+08:00','2026-10-23T07:00:00+08:00'],
     ['2026-10-23T08:59:59Z','2026-10-23T09:00:00Z'],
-    ['2026-10-31T17:00:00+08:00','2026-11-01T06:00:00+08:00'],
-    ['2026-12-31T23:00:00+08:00','2027-01-01T06:00:00+08:00'],
-    ['2028-02-28T17:00:00+08:00','2028-02-29T06:00:00+08:00'],
+    ['2026-10-31T23:59:59+08:00','2026-11-01T00:00:00+08:00'],
+    ['2026-12-31T23:00:00+08:00','2027-01-01T00:00:00+08:00'],
+    ['2028-02-28T23:59:59+08:00','2028-02-29T00:00:00+08:00'],
   ])assert.equal(nextBankCheck(Date.parse(from)),Date.parse(to));
 });
 
@@ -83,10 +84,10 @@ test('Bank starts without a fetch, runs only at scheduled times and cancels its 
   f.options.setTimer=(run,ms)=>{const job={run,ms,cancelled:false};jobs.push(job);return job;};
   f.options.clearTimer=job=>{if(job)job.cancelled=true;};
   const monitor=f.monitor();monitor.start();monitor.start();
-  assert.equal(jobs.length,1);assert.equal(jobs[0].ms,5*3600000);assert.equal(f.store.initialized,false);
+  assert.equal(jobs.length,1);assert.equal(jobs[0].ms,3600000);assert.equal(f.store.initialized,false);
   f.advance(jobs[0].ms);await jobs[0].run();assert.equal(f.store.initialized,true);assert.equal(f.posts(),0);
-  assert.equal(jobs[1].ms,13*3600000);f.rows([raw(),raw(2)]);
-  f.advance(jobs[1].ms);await jobs[1].run();assert.equal(f.posts(),1);assert.equal(jobs[2].ms,11*3600000);
+  assert.equal(jobs[1].ms,3600000);f.rows([raw(),raw(2)]);
+  f.advance(jobs[1].ms);await jobs[1].run();assert.equal(f.posts(),1);assert.equal(jobs[2].ms,3600000);
   monitor.stop();assert.equal(jobs[2].cancelled,true);await jobs[2].run();assert.equal(jobs.length,3);assert.equal(f.posts(),1);
   const disabled=new BankMonitor({env:{},setTimer:()=>{throw Error('disabled must not schedule');}});disabled.start();
 });

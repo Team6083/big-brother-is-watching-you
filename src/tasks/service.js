@@ -1,4 +1,4 @@
-import { discordOwners, withDiscordOwners, withDiscordAssigner } from './owners.js';
+import { discordOwners, withDiscordOwners, withDiscordAssigner, assigneeIds } from './owners.js';
 import { withTaskDescription } from './description.js';
 import { isTaskThread } from './scope.js';
 const snowflake=id=>/^\d{17,20}$/.test(id || '');
@@ -65,11 +65,11 @@ export class TaskService {
     } else if(kind==='edit') {
       const ids=[...new Set(input.ids || [])];
       if(!ids.length || ids.length>5 || ids.some(id=>!snowflake(id)))throw new Error('task_invalid_owners');
-      if(!snowflake(input.assigner))throw new Error('task_invalid_assigner');
+      const assignees=assigneeIds(input.assigner);
       const person=id=>({id,name:String(input.names?.[id] || id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
       const lists=await this.trello.lists();
       if(!lists.some(l=>l.id===input.status && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');
-      payload={desc:withDiscordAssigner(withDiscordOwners(card.desc,ids.map(person)),person(input.assigner)),idList:input.status};
+      payload={desc:withDiscordAssigner(withDiscordOwners(card.desc,ids.map(person)),assignees.map(person)),idList:input.status};
       if(input.description!==undefined)payload.desc=withTaskDescription(payload.desc,input.description);
       for(const [key,end] of [['start',false],['due',true]])if(input[key]?.trim())payload[key]=parseDate(input[key].trim(),end);
       const start=payload.start===undefined?card.start:payload.start,due=payload.due===undefined?card.due:payload.due;
@@ -102,7 +102,7 @@ export class TaskService {
         const lists=await this.trello.lists();
         if(!lists.some(l=>l.id===payload.idList && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');
         const person=id=>({id,name:String(input.names?.[id] || id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
-        payload.desc=withDiscordAssigner(withDiscordOwners(card.desc,[...new Set(input.ids)].map(person)),person(input.assigner));
+        payload.desc=withDiscordAssigner(withDiscordOwners(card.desc,[...new Set(input.ids)].map(person)),assigneeIds(input.assigner).map(person));
         if(input.description!==undefined)payload.desc=withTaskDescription(payload.desc,input.description);
         await this.store.savePayload(id,payload);
       }

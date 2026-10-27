@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {TaskCreationService,creationInput} from '../src/tasks/create-service.js';
+import {TaskCreationService,creationInput,creationPayload} from '../src/tasks/create-service.js';
 import {createTaskCommand,createTaskModal,taskDateCursor,taskDateControls} from '../src/tasks/create-ui.js';
 import {registerTeamTaskCreation} from '../src/tasks/create-interactions.js';
 import {TaskService} from '../src/tasks/service.js';
@@ -8,6 +8,7 @@ import {discordOwners,discordAssigner} from '../src/tasks/owners.js';
 import {taskDescription} from '../src/tasks/description.js';
 
 const guild='900000000000000100',channel='900000000000000010',thread='900000000000000102',actor='900000000000000103',owner='900000000000000104',assignee='900000000000000105',id='900000000000000106';
+const anotherAssignee='900000000000000107';
 const board='aaaaaaaaaaaaaaaaaaaaaaaa',cardId='bbbbbbbbbbbbbbbbbbbbbbbb',list='cccccccccccccccccccccccc';
 const input={title:'底盤教學',description:'工作內容：製作教學\n完成標準：講義\n參考資料：無',ids:[owner],assigner:assignee,status:list,start:'2026-11-20',due:'2026-11-28',names:{[owner]:'Owner',[assignee]:'Assignee'}};
 
@@ -37,6 +38,7 @@ test('creation picker has no date text input and respects Discord component limi
   const modal=createTaskModal(id,draft).toJSON();
   assert.deepEqual(modal.components.map(c=>c.component.type),[4,4,5,5,3]);
   assert.equal(modal.components[2].component.max_values,5);
+  assert.equal(modal.components[3].component.max_values,5);
   assert.equal(modal.components[3].component.default_values[0].id,actor);
   assert.equal(createTaskCommand.toJSON().name,'建立任務');
   for(const month of [2,4,12])for(const year of [2027,2028])for(const page of [0,1]) {
@@ -103,8 +105,8 @@ test('lost notice response leaves a durable ambiguous receipt and is never pinge
   await new TaskCreationService({...f.service}).reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});assert.equal(attempts,1);
 });
 
-function interactionFixture() {
-  const f=fixture(),members=new Map([actor,owner,assignee].map(id=>[id,{user:{id,bot:false},displayName:id===owner?'Owner':'Assignee',roles:{cache:new Map()}}]));
+function interactionFixture(assignees=[assignee]) {
+  const f=fixture(),members=new Map([actor,owner,assignee,anotherAssignee].map(id=>[id,{user:{id,bot:false},displayName:id===owner?'Owner':'Assignee',roles:{cache:new Map()}}]));
   let handler,result,modal,actorAllowed=true,targetAllowed=true,botAllowed=true;
   const parent={id:channel,guildId:guild,type:0,permissionsFor:member=>({has:()=>member?.id==='bot'?botAllowed:member.user?.id===actor?actorAllowed:targetAllowed}),
     guild:{members:{fetch:async({user})=>members.get(user)}},threads:{create:async()=>{const created=await f.discord.createThread();channels.set(thread,{...created,send:async payload=>{assert.equal((await f.store.get(id)).state,'succeeded');result.notice=payload;return {id:actor};}});return created;}}};
@@ -117,8 +119,47 @@ function interactionFixture() {
     run:async patch=>{result??={};await handler({...base,...patch});return result.reply;},
     command:()=>({commandName:'建立任務',isChatInputCommand:()=>true,options:{getString:()=>null}}),
     button:action=>({customId:'create_task:'+action+':'+id,isButton:()=>true}),select:(action,value)=>({customId:'create_task:'+action+':'+id,isStringSelectMenu:()=>true,values:[value]}),
-    details:()=>({customId:'create_task:details:'+id,isModalSubmit:()=>true,fields:{getField:key=>({values:key==='owners'?[owner]:[assignee]}),getTextInputValue:key=>key==='title'?input.title:input.description,getStringSelectValues:()=>[list]}})};
+    details:()=>({customId:'create_task:details:'+id,isModalSubmit:()=>true,fields:{getField:key=>({values:key==='owners'?[owner]:assignees}),getTextInputValue:key=>key==='title'?input.title:input.description,getStringSelectValues:()=>[list]}})};
 }
+
+test('multiple assignees survive preview, editing, card creation and a single targeted notice',async()=>{
+  const f=interactionFixture([assignee,owner]);await f.run(f.command());await f.run(f.details());
+  assert.match(f.result.reply.content,new RegExp('Assignee：<@'+assignee+'> <@'+owner+'>'));
+  assert.deepEqual(f.result.reply.allowedMentions,{parse:[]});assert.equal(f.counts().posts,0);
+  await f.run(f.button('edit'));
+  assert.deepEqual(f.modal.components[3].component.default_values.map(p=>p.id),[assignee,owner]);
+  await f.run(f.button('save'));
+  assert.deepEqual(discordAssigner(f.cards[0].desc),[{id:assignee,name:'Assignee'},{id:owner,name:'Owner'}]);
+  assert.deepEqual(f.result.notice.allowedMentions.users,[owner,assignee]);
+  assert.match(f.result.notice.content,new RegExp('Assignee：<@'+assignee+'> <@'+owner+'>'));
+  await f.run(f.button('check'));assert.equal(f.counts().posts,1);
+});
+
+test('empty, oversized or invalid assignee lists cannot create a thread or card',async()=>{
+  for(const assigner of [[],Array.from({length:6},(_,i)=>'90000000000000012'+i),[assignee,'bad'],[assignee,null]]) {
+    const f=fixture();await assert.rejects(f.service.create({...f.op,input:{...input,assigner}}));
+    assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
+  }
+});
+
+test('each selected assignee must still be human and authorized when confirming creation',async()=>{
+  for(const invalid of ['bot','permissions']) {
+    const f=interactionFixture([assignee,anotherAssignee]);await f.run(f.command());await f.run(f.details());
+    if(invalid==='bot')f.members.get(anotherAssignee).user.bot=true;
+    else {const permissions=f.parent.permissionsFor;f.parent.permissionsFor=member=>member?.user?.id===anotherAssignee?{has:()=>false}:permissions(member);}
+    await f.run(f.button('save'));assert.match(f.result.reply.content,/人類成員/);
+    assert.equal(f.counts().threads,0);assert.equal(f.counts().posts,0);
+  }
+});
+
+test('a legacy pending single-assignee receipt reconciles without changing its original card payload',async()=>{
+  const f=fixture(),row={id,guild_id:guild,channel_id:channel,actor_id:actor,input:structuredClone(input),thread_id:thread,board_id:board};
+  await f.store.reserve(row);await f.store.attachThread(id,thread);
+  f.cards.push({...creationPayload(row),id:cardId,idBoard:board,closed:false,shortUrl:'https://trello.com/c/example1'});
+  assert.equal(discordAssigner(f.cards[0].desc).id,assignee);
+  await f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});
+  assert.equal((await f.store.get(id)).state,'succeeded');assert.deepEqual(f.counts(),{posts:0,threads:0,notices:1});
+});
 
 test('Discord flow selects dates, previews, creates once, and pings only selected people in the task thread',async()=>{
   const f=interactionFixture();await f.run(f.command());assert.equal(f.result.flags,64);await f.run(f.button('open'));

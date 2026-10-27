@@ -1,4 +1,4 @@
-import {withDiscordOwners,withDiscordAssigner} from './owners.js';
+import {withDiscordOwners,withDiscordAssigner,assigneeIds} from './owners.js';
 import {withTaskDescription} from './description.js';
 import {parseDate} from './service.js';
 import {validateAck} from '../webhook.js';
@@ -9,17 +9,18 @@ export function creationInput(input) {
   if(!title || title.length>100 || /[\r\n]/.test(title))throw new Error('create_invalid_title');
   if(!description)throw new Error('task_invalid_description');
   withTaskDescription('',description);
-  if(!ids.length || ids.length>5 || !ids.every(snowflake) || !snowflake(input.assigner))throw new Error('create_invalid_members');
+  if(!ids.length || ids.length>5 || !ids.every(snowflake))throw new Error('create_invalid_members');
+  const assigner=assigneeIds(input.assigner);
   const start=input.start?parseDate(input.start):null,due=input.due?parseDate(input.due,true):null;
   if(start&&due&&start>due)throw new Error('task_date_order');
-  return {title,description,ids,assigner:input.assigner,start:input.start||null,due:input.due||null,status:input.status,names:input.names||{}};
+  return {title,description,ids,assigner,start:input.start||null,due:input.due||null,status:input.status,names:input.names||{}};
 }
 
 export function creationPayload(row) {
   const input=row.input,url=`https://discord.com/channels/${row.guild_id}/${row.thread_id}`;
   const person=id=>({id,name:String(input.names[id]||id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
   const desc=withTaskDescription(withDiscordAssigner(withDiscordOwners(
-    `Discord 建立者：${row.actor_id}\n原始 Discord 討論連結：${url}\nCMSFTC_THREAD_ID=${row.thread_id}`,input.ids.map(person)),person(input.assigner)),input.description);
+    `Discord 建立者：${row.actor_id}\n原始 Discord 討論連結：${url}\nCMSFTC_THREAD_ID=${row.thread_id}`,input.ids.map(person)),assigneeIds(input.assigner).map(person)),input.description);
   return {name:input.title,desc,idList:input.status,start:input.start?parseDate(input.start):null,due:input.due?parseDate(input.due,true):null};
 }
 
