@@ -139,3 +139,9 @@ test('waking after deadline sends only the final stage, without obsolete reminde
   assert.equal(sends,1);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
+test('PM skips malformed Discord metadata on one card without failing the scan',()=>{
+  const s=sample(),bad='<!-- CMSFTC_DISCORD_OWNERS_BEGIN -->\nnot json\n<!-- CMSFTC_DISCORD_OWNERS_END -->';
+  s.cards.push({...s.cards[0],id:'bad',desc:`CMSFTC_THREAD_ID=${thread}\n${bad}\n<!-- CMSFTC_DISCORD_ASSIGNER_BEGIN -->\nnot json\n<!-- CMSFTC_DISCORD_ASSIGNER_END -->`,idMembers:['human']});
+  const r=analyze(s,{now});assert.equal(r.tasks.length,2);
+  const card=r.tasks.find(t=>t.task_id==='bad');assert.deepEqual(card.discord_owner_ids,[]);assert.equal(card.assigner,null);assert.equal(card.owner[0].id,'human');
+});
