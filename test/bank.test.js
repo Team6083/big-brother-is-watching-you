@@ -6,7 +6,7 @@ import {BankMonitor,bankDiscord} from '../src/bank/monitor.js';
 
 const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000201',DISCORD_GUILD_ID:'900000000000000200'};
 const config=bankConfig(env),now=Date.parse('2026-10-23T12:00:00+08:00'),messageId='900000000000000202';
-const raw=(id=1,patch={})=>({id,title:'任務 @everyone',description:'工作內容 <@900000000000000203>',reward:50,status:'進行中',startDate:'2026-10-25',deadline:'2026-10-30',category:'Example',level:1,type:'限時',rewardType:'money',rewardItem:'',...patch});
+const raw=(id=1,patch={})=>({id,title:'任務 @everyone',description:'工作內容 <@900000000000000203>',reward:50,status:'進行中',startDate:'2026-10-20',deadline:'2026-10-30',category:'Example',level:1,type:'限時',rewardType:'money',rewardItem:'',...patch});
 const tasks=rows=>normalizeMissions(rows,config,now);
 
 test('Bank is disabled by default and validates explicit feature configuration',()=>{
@@ -28,10 +28,21 @@ test('Bank schedules the next whole hour across UTC, day, month and leap-year bo
   ])assert.equal(nextBankCheck(Date.parse(from)),Date.parse(to));
 });
 
-test('Bank uses stable IDs, Taiwan deadline dates and open status; future start is still announced',()=>{
+test('Bank uses stable IDs, Taiwan deadline dates and open status',()=>{
   const result=tasks([raw(1),raw(2,{status:'截止'}),raw(3,{deadline:'2026-10-22'}),raw(4,{deadline:'2026-10-23'}),raw(5,{deadline:''}),raw(6,{status:'即將截止'})]);
   assert.deepEqual(result.map(t=>t.active),[true,false,false,true,true,true]);assert.equal(result[0].url,'https://bank.example.org/mission/1');
   for(const rows of [{data:[]},[raw(1),raw(1)],[raw(1,{id:'1'})],[raw(1,{deadline:'2026-02-30'})],[raw(1,{description:null})],[raw(1,{reward:NaN})]])assert.throws(()=>tasks(rows),/bank_invalid_response/);
+});
+
+test('Bank waits for both Taiwan start date and open status without discarding unready tasks',()=>{
+  const rows=[raw(1,{startDate:'2026-10-24'}),raw(2,{status:''}),raw(3,{status:'未發布'}),raw(4,{status:'即將開始'}),
+    raw(5,{startDate:''}),raw(6,{status:'截止'}),raw(7,{status:'',deadline:'2026-10-22'})];
+  const result=tasks(rows);
+  assert.deepEqual(result.map(t=>t.active),[false,false,false,false,true,false,false]);
+  assert.deepEqual(result.map(t=>t.waiting),[true,true,true,true,false,false,false]);
+  const before=Date.parse('2026-10-23T23:59:59+08:00'),start=Date.parse('2026-10-24T00:00:00+08:00');
+  assert.equal(normalizeMissions([rows[0]],config,before)[0].active,false);
+  assert.equal(normalizeMissions([rows[0]],config,start)[0].active,true);
 });
 
 test('Bank GET uses the observed public endpoint without credentials and retries temporary failures finitely',async()=>{
@@ -116,6 +127,14 @@ test('429 retries are bounded and known permission rejection stays failed',async
   for(let n=0;n<6;n++){await f.monitor().tick();f.advance(3600000);}
   assert.equal(attempts,5);assert.equal(f.store.rows.get('2').state,'failed');
   const g=fixture();await g.monitor().tick();g.rows([raw(),raw(2)]);g.options.discord.send=async()=>{throw Object.assign(Error('private'),{status:403});};await g.monitor().tick();assert.equal(g.store.rows.get('2').state,'failed');
+});
+
+test('a queued retry whose start was postponed waits instead of being permanently ignored',async()=>{
+  const f=fixture();await f.monitor().tick();f.rows([raw(),raw(2)]);
+  f.options.discord.send=async()=>{throw Object.assign(Error('limited'),{status:429});};
+  await f.monitor().tick();assert.equal(f.store.rows.get('2').state,'pending');
+  f.advance(3600000);f.rows([raw(),raw(2,{startDate:'2026-10-25'})]);
+  await f.monitor().tick();assert.equal(f.store.rows.get('2').state,'waiting');
 });
 
 test('lost send acknowledgment is only reconciled from history, never sent again',async()=>{

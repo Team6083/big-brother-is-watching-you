@@ -17,6 +17,7 @@ import {TaskCreationService} from '../src/tasks/create-service.js';
 import {migrationFailure} from '../src/state/diagnostics.js';
 import {MongoBankStore} from '../src/state/bank.js';
 import {BankMonitor} from '../src/bank/monitor.js';
+import {bankConfig,normalizeMissions} from '../src/bank/source.js';
 
 test('MongoDB replica-set integration', {timeout:360000},async t=>{
   const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
@@ -223,6 +224,44 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await new BankMonitor(options).tick();assert.equal(sends,0);current=tasks;
     await new BankMonitor(options).tick();await new BankMonitor(options).tick();assert.equal(sends,1);
   });
+  await t.test('Bank keeps unready tasks across restart and sends once only after start and open status',async()=>{
+    const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000182',DISCORD_GUILD_ID:guild},config=bankConfig(env);
+    const raw=id=>({id,title:'Synthetic',description:'Test',category:'Example',type:'限時',status:'',startDate:'2026-10-28',deadline:'2026-10-29',reward:1,rewardType:'money',rewardItem:''});
+    let time=Date.parse('2026-10-27T23:59:59+08:00'),rows=[raw(1)],posts=0;
+    const options={state:db,env,log:()=>{},now:()=>time,read:async()=>normalizeMissions(rows,config,time),
+      discord:{verify:async()=>{},findSent:async()=>[],send:async()=>{posts++;return {id:actor};}}};
+    await new BankMonitor(options).tick();rows.push(raw(2));await new BankMonitor(options).tick();
+    const taskId='task:'+config.sourceKey+':2',stored=()=>db.collection('bank_notifications').findOne({_id:taskId});
+    assert.equal((await stored()).state,'waiting');assert.equal(posts,0);
+    rows[1].status='進行中';await new BankMonitor(options).tick();assert.equal((await stored()).state,'waiting');assert.equal(posts,0);
+    time=Date.parse('2026-10-28T00:00:00+08:00');rows[1].status='即將開始';
+    await new BankMonitor(options).tick();assert.equal(posts,0);
+    rows.forEach(row=>{row.status='進行中';});await new BankMonitor(options).tick();await new BankMonitor(options).tick();
+    assert.equal(posts,1);assert.equal((await stored()).state,'sent');
+    assert.equal((await db.collection('bank_notifications').findOne({_id:'task:'+config.sourceKey+':1'})).state,'ignored');
+    rows.push({...raw(3),startDate:'2026-10-29'});await new BankMonitor(options).tick();
+    time=Date.parse('2026-10-30T00:00:00+08:00');await new BankMonitor(options).tick();
+    assert.equal((await db.collection('bank_notifications').findOne({_id:'task:'+config.sourceKey+':3'})).state,'ignored');assert.equal(posts,1);
+    rows[2].status='進行中';rows[2].deadline='2026-10-31';await new BankMonitor(options).tick();assert.equal(posts,1);
+  });
+  await t.test('Bank recovers legacy unready ignores without replaying baseline, closed or delivery receipts',async()=>{
+    const bank=new MongoBankStore(db),source='synthetic_bank_legacy_waiting',started=Date.parse('2026-10-28T00:00:00+08:00');
+    const payload=id=>({id:String(id),status:'',startDate:'2026-10-28',deadline:'2026-10-30',active:false});
+    await bank.recordSnapshot(source,[payload(1)],now);
+    const states=['ignored','ignored','ignored','ignored','sent','uncertain','failed'];
+    await db.collection('bank_notifications').insertMany(states.map((state,index)=>({
+      _id:'task:'+source+':'+(index+2),kind:'task',source_key:source,task_id:String(index+2),state,
+      payload:{...payload(index+2),status:['','未發布','即將開始','截止','','',''][index]},
+      attempts:0,next_attempt_at:now,lease_until:0,created_at:now,message_id:null,last_error:null,
+    })));
+    const open=Array.from({length:8},(_,i)=>({...payload(i+1),status:'進行中',active:true,waiting:false}));
+    assert.deepEqual(await bank.recordSnapshot(source,open,started),{initial:false,queued:3});
+    assert.deepEqual(await new MongoBankStore(db).recordSnapshot(source,open,started),{initial:false,queued:0});
+    for(const [id,state] of [[1,'ignored'],[2,'pending'],[3,'pending'],[4,'pending'],[5,'ignored'],[6,'sent'],[7,'uncertain'],[8,'failed']])
+      assert.equal((await db.collection('bank_notifications').findOne({_id:'task:'+source+':'+id})).state,state);
+    const claims=await Promise.all([bank.claim(source,started),new MongoBankStore(db).claim(source,started)]);
+    assert.equal(new Set(claims.map(row=>row._id)).size,2);
+  });
   await t.test('Bank restart reconciles ambiguous sends by history without another POST',async()=>{
     const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000181',DISCORD_GUILD_ID:guild};
     let current=[],posts=0;
@@ -230,7 +269,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await new BankMonitor(options).tick();current=[{id:'3',active:true,url:'https://bank.example.org/mission/3'}];
     await new BankMonitor(options).tick();assert.equal(posts,1);
     await new BankMonitor(options).tick();assert.equal(posts,1);
-    const rows=await db.collection('bank_notifications').find({task_id:'3'}).toArray();assert.equal(rows[0].state,'sent');assert.equal(rows[0].message_id,actor);
+    const rows=await db.collection('bank_notifications').find({task_id:'3',source_key:bankConfig(env).sourceKey}).toArray();assert.equal(rows[0].state,'sent');assert.equal(rows[0].message_id,actor);
   });
   await t.test('Bank interrupted send is recovered only after lease expiry',async()=>{
     const bank=new MongoBankStore(db),source='synthetic_bank_crash';
