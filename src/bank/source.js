@@ -13,9 +13,8 @@ export function bankConfig(env=process.env) {
 }
 
 export function nextBankCheck(now=Date.now()) {
-  const hour=3600000,local=new Date(now+8*hour);
-  const midnight=Date.UTC(local.getUTCFullYear(),local.getUTCMonth(),local.getUTCDate())-8*hour;
-  return [6,17,30].map(hours=>midnight+hours*hour).find(at=>at>now);
+  const hour=3600000;
+  return (Math.floor(now/hour)+1)*hour;
 }
 
 const validDate=value=>value===''||/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value+'T00:00:00Z'))&&new Date(value+'T00:00:00Z').toISOString().slice(0,10)===value;

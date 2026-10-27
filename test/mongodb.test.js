@@ -116,6 +116,37 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await assert.rejects(db.transaction(async session=>{await db.collection('meeting_dates').insertOne({_id:'rollback',channel_id:meetingChannelId,meeting_date:'2026-10-30'},{session});throw new Error('rollback');}));
     assert.equal(await db.collection('meeting_dates').findOne({_id:'rollback'}),null);
   });
+  await t.test('meeting edits after the reminder keep MongoDB receipts and rescheduling updates the date transactionally',async()=>{
+    const id='900000000000000188',initial=Date.parse('2026-10-23T10:00:00+08:00'),editAt=Date.parse('2026-10-25T19:00:00+08:00');
+    await meetings.set(id,'2026-10-26','16:00',actor,'Room',initial,'17:30');
+    const claimed=await meetings.claim(await meetings.get(id));await meetings.markSent(claimed,actor);
+    await meetings.set(id,'2026-10-26','19:00',actor,'New room',editAt,'20:30');
+    const edited=await new MongoMeetingStore(db).get(id);
+    assert.equal(edited.starts_at,Date.parse('2026-10-26T19:00:00+08:00'));assert.equal(edited.status,'sent');assert.equal(edited.message_id,actor);
+    assert.deepEqual(await meetings.recordDates(id),['2026-10-26']);
+    await assert.rejects(meetings.set(id,'2026-10-26','18:00',actor,'Stale edit',editAt,'20:30',claimed),/會議資料已變更/);
+    assert.equal((await meetings.get(id)).location,'New room');
+    const moved=await meetings.set(id,'2026-10-27','19:00',actor,'New room',editAt,'20:30');
+    assert.equal(moved.status,'pending');assert.equal(moved.message_id,null);assert.equal(moved.remind_at,Date.parse('2026-10-26T17:00:00+08:00'));
+    assert.deepEqual(await meetings.recordDates(id),['2026-10-27']);
+  });
+  await t.test('combined MongoDB meeting and record saves roll back together; cancellation preserves history and rejects stale edits',async()=>{
+    const id='900000000000000187',at=Date.parse('2026-10-25T10:00:00+08:00');
+    const combined=new MongoMeetingStore(db),row=await combined.set(id,'2026-10-27','16:00',actor,'Room',at,'17:30',undefined,'https://example.org/first');
+    assert.equal((await combined.record(id,'2026-10-27')).url,'https://example.org/first');
+    const update=combined.records.updateOne;
+    combined.records.updateOne=async()=>{throw Error('synthetic record failure');};
+    try{await assert.rejects(combined.set(id,'2026-10-28','16:00',actor,'Changed',at,'17:30',row,'https://example.org/new'),/synthetic record failure/);}
+    finally{combined.records.updateOne=update;}
+    assert.deepEqual(await combined.get(id),row);assert.deepEqual(await combined.recordDates(id),['2026-10-27']);
+    assert.equal(await combined.record(id,'2026-10-28'),undefined);
+    const moved=await combined.set(id,'2026-10-28','16:00',actor,'Changed',at,'17:30',row,'https://example.org/new');
+    await assert.rejects(combined.cancel(id,at,row),/會議資料已變更/);
+    await combined.claim(moved);await assert.rejects(combined.cancel(id,at,moved),/提醒正在發送/);
+    await combined.recoverSending(id);await combined.cancel(id,at,moved);
+    assert.equal((await combined.get(id)).status,'cancelled');assert.deepEqual(await combined.recordDates(id),['2026-10-28','2026-10-27']);
+    await combined.setRecord(id,'2026-10-28','',actor);assert.equal(await combined.record(id,'2026-10-28'),undefined);
+  });
   await t.test('meeting notices send once; uncertain sends survive reconnect',async()=>{
     await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');let sent=0;
     const reminder=new MeetingReminder({store:meetings,verify:async()=>{},send:async p=>{sent++;assert.match(p.content,/20:30/);return {id:actor};},now:()=>Date.parse('2026-10-19T17:00:00+08:00'),log:()=>{}});
@@ -152,8 +183,9 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
       create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://trello.com/c/example2',closed:false});throw Error('task_trello_unconfirmed');}};
     const discord={createThread:async()=>{threads++;return {id:teamThread,guildId:guild,parentId:parent,type:11};},notify:async()=>{pings++;return {id:actor};}};
     const service=new TaskCreationService({store:creation,trello,discord,authorize:async()=>{}});
-    const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:actor,status:list,due:'2026-10-20'}};
+    const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:[actor,'900000000000000122'],status:list,due:'2026-10-20'}};
     await assert.rejects(service.create(op));assert.equal((await creation.get(operation)).state,'card_pending');assert.equal(pings,0);
+    assert.deepEqual((await new MongoCreationStore(db).get(operation)).input.assigner,op.input.assigner);
     const restarted=new TaskCreationService({...service,store:new MongoCreationStore(db)});
     await Promise.all([restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor}),restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor})]);
     assert.equal(writes,1);assert.equal(threads,1);assert.equal(pings,1);

@@ -189,6 +189,22 @@ test('combined form saves owner, assigner, dates and status in one confirmed car
   await f.service.execute(op);assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
+
+test('multiple assignees remain visible and selected when reopening task settings',async()=>{
+ const f=fixture();try{
+  const op=fullEdit(f);op.input.assigner=[person,other];await f.service.execute(op);
+  const people=[{id:person,name:'指派者'},{id:other,name:'執行者'}];
+  assert.deepEqual(discordAssigner(f.card.desc),people);
+  const lists=await f.trello.lists(),view=taskView(f.card,lists),modal=editModal(f.card,lists,person,operation).toJSON();
+  assert.match(view.fields[1].value,/指派者/);assert.match(view.fields[1].value,/執行者/);
+  assert.equal(modal.components[1].component.max_values,5);
+  assert.deepEqual(modal.components[1].component.default_values.map(p=>p.id),[person,other]);
+  op.id='900000000000000016';op.input.start='2026-10-05';await f.service.execute(op);
+  assert.deepEqual(discordAssigner(f.card.desc),people);assert.equal(f.writes.length,2);
+  const report=analyze({board:{id:boardId},fetched_at:'2026-10-04T10:00:00Z',lists:[{id:f.card.idList,name:'進行中'}],members:[],actions:[],cards:[f.card]});
+  assert.deepEqual(report.tasks[0].assigner,people);
+ }finally{f.db.close();}
+});
 test('combined form rejects invalid dates or foreign, archived and missing status before any write',async()=>{
  for(const variant of ['date','order','foreign','closed','missing']) {
   const f=fixture();try{const op=fullEdit(f);
@@ -234,7 +250,7 @@ test('unified Discord modal has five labeled fields, two user pickers, prefilled
  }finally{f.db.close();}
 });
 
-test('command opens unified modal and submit confirms one update before targeted owner notification',async()=>{
+for(const assignees of [[person],[person,other]])test('command submits '+assignees.length+' assignees before targeted owner notification',async()=>{
  const saved={...process.env},priorFetch=globalThis.fetch,f=fixture();const op=fullEdit(f);let handler,panel,modal,confirmation,puts=0;
  Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
  globalThis.fetch=async(url,options)=>{
@@ -254,9 +270,9 @@ test('command opens unified modal and submit confirms one update before targeted
   await handler({...base,customId:custom,isChatInputCommand:()=>false,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
   assert.equal(modal.components.length,5);assert.equal(puts,0);
   await handler({...base,id:'900000000000000019',customId:modal.custom_id,isChatInputCommand:()=>false,isButton:()=>false,isModalSubmit:()=>true,
-   fields:{getField:key=>({values:key==='owners'?[other]:[person]}),getTextInputValue:key=>key==='dates'?'開始：'+op.input.start+'\n截止：'+op.input.due:op.input.description,getStringSelectValues:()=>[op.input.status]},
+   fields:{getField:key=>({values:key==='owners'?[other]:assignees}),getTextInputValue:key=>key==='dates'?'開始：'+op.input.start+'\n截止：'+op.input.due:op.input.description,getStringSelectValues:()=>[op.input.status]},
    deferReply:async()=>{},editReply:async p=>{confirmation=p;}});
-  assert.equal(puts,1);assert.equal(confirmation.content,'✅ 任務人員、日期、狀態與描述已更新至 Trello。\nOwner：<@'+other+'>｜Assignee：指派者');assert.deepEqual(confirmation.allowedMentions.users,[other]);
+  assert.equal(puts,1);assert.equal(confirmation.content,'✅ 任務人員、日期、狀態與描述已更新至 Trello。\nOwner：<@'+other+'>｜Assignee：'+assignees.map(id=>id===person?'指派者':'執行者').join('、'));assert.deepEqual(confirmation.allowedMentions.users,[other]);
   let viewed,privateFlag;
   await handler({...base,customId:'task:view',isChatInputCommand:()=>false,isButton:()=>true,
    deferReply:async p=>{privateFlag=p.flags;},editReply:async p=>{viewed=p;}});
@@ -265,6 +281,8 @@ test('command opens unified modal and submit confirms one update before targeted
   f.card.desc=withDiscordOwners(f.card.desc,[{id:other,name:'執行者'},{id:person,name:'協作 Mentor'}]);
   await handler({...base,id:'900000000000000018',commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
   assert.ok(panel.content.includes('負責人：執行者、協作 Mentor'));assert.deepEqual(panel.allowedMentions,{parse:[]});assert.equal(puts,1);
+  await handler({...base,customId:'task:edit:900000000000000018',isChatInputCommand:()=>false,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
+  assert.deepEqual(modal.components[1].component.default_values.map(p=>p.id),assignees);
 
  }finally{globalThis.fetch=priorFetch;for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
 });
@@ -350,6 +368,18 @@ test('retired progress buttons direct users to status updates without accessing 
  await handler({customId:'task:progress',isChatInputCommand:()=>false,isButton:()=>true,isAutocomplete:()=>false,
  channel:{...f.thread,permissionsFor:()=>({has:()=>true})},user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},reply:async p=>{reply=p;}});
  assert.ok(reply.content.includes('更新狀態'));assert.equal(f.writes.length,0);
+ }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
+});
+
+test('task command in allowed captain or cadre text channels explains how to create a task without reading Trello',async()=>{
+ const saved={...process.env},f=fixture();let handler,reply;
+ Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
+ try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{});
+ for(const id of process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')) {
+  await handler({commandName:'任務',isChatInputCommand:()=>true,isAutocomplete:()=>false,
+   channel:{id,guildId:guild,type:0},user:{id:person,bot:false},reply:async p=>{reply=p;}});
+  assert.match(reply.content,/\/建立任務/);assert.match(reply.content,/討論串/);assert.equal(reply.flags,64);assert.equal(f.writes.length,0);
+ }
  }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
 });
 

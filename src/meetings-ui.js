@@ -10,12 +10,13 @@ export function dateOptions(now=Date.now(),page=0) {
     return {value,label:`${value}（星期${'日一二三四五六'[day.getUTCDay()]}）`};
   });
 }
-export function dateControls(id,options,page) {
+export function dateControls(id,options,page,selected) {
   return [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('meeting:date:'+id)
-    .setPlaceholder('選擇會議日期（台灣時間）').addOptions(options)),new ActionRowBuilder().addComponents(
+    .setPlaceholder('選擇會議日期（台灣時間）').addOptions(options.map(o=>({...o,default:o.value===selected})))),new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`meeting:page:${id}:${page-1}`).setLabel('前 25 天').setStyle(ButtonStyle.Secondary).setDisabled(page===0),
     new ButtonBuilder().setCustomId(`meeting:page:${id}:${page+1}`).setLabel('後 25 天').setStyle(ButtonStyle.Secondary).setDisabled(page===11),
     new ButtonBuilder().setCustomId('meeting:discard:'+id).setLabel('取消設定').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('meeting:record_history:'+id).setLabel('既有會議記錄').setStyle(ButtonStyle.Secondary),
   )];
 }
 export function timeModal(id,draft) {
@@ -24,7 +25,7 @@ export function timeModal(id,draft) {
   if(draft.location)location.setValue(draft.location);
   const field=(key,label,count,step,value)=>new LabelBuilder().setLabel(label).setStringSelectMenuComponent(
     new StringSelectMenuBuilder().setCustomId(key).setRequired(true).setMinValues(1).setMaxValues(1).addOptions(
-      Array.from({length:count},(_,n)=>({label:pad(n*step),value:pad(n*step),default:pad(n*step)===value}))));
+      Array.from({length:count},(_,n)=>({label:key.endsWith('_hour')?`${pad(n)}（${n===0?'午夜':n<6?'凌晨':n<12?'上午':n===12?'中午':n<18?'下午':'晚上'}${n%12||12}點）`:pad(n*step),value:pad(n*step),default:pad(n*step)===value}))));
   modal.addLabelComponents(
     field('start_hour','開始：幾點（24 小時制）',24,1,draft.start?.slice(0,2)),
     field('start_minute','開始：幾分',12,5,draft.start?.slice(3)),
@@ -40,12 +41,29 @@ export function selectedTimes(fields) {
   if(![start,end].every(t=>/^([01]\d|2[0-3]):[0-5][05]$/.test(t)))throw new Error('請重新選擇開始與結束時間。');
   return {start,end};
 }
-export function previewControls(id) {
-  return [new ActionRowBuilder().addComponents(
+export function previewControls(id,editing=false) {
+  const rows=[new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('meeting:save:'+id).setLabel('確認儲存').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('meeting:change_date:'+id).setLabel('修改日期').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('meeting:edit:'+id).setLabel('修改時間／地點').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('meeting:record_link:'+id).setLabel('會議記錄連結').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('meeting:discard:'+id).setLabel('取消設定').setStyle(ButtonStyle.Secondary),
   )];
+  if(editing)rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('meeting:cancel:'+id).setLabel('取消會議').setStyle(ButtonStyle.Danger)));
+  return rows;
+}
+
+export function cancelControls(id) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('meeting:confirm_cancel:'+id).setLabel('確認取消會議').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('meeting:keep:'+id).setLabel('返回編輯').setStyle(ButtonStyle.Secondary),
+  )];
+}
+
+export function savedMeetingControls(row,now=Date.now()) {
+  return row?.starts_at>now&&['pending','sent','uncertain'].includes(row.status)?[new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('meeting:open_edit').setLabel('編輯會議').setStyle(ButtonStyle.Primary),
+  )]:[];
 }
 
 export function recordControls(id,dates,page=0) {
@@ -58,9 +76,9 @@ export function recordControls(id,dates,page=0) {
     )];
 }
 
-export function recordModal(id,date,url) {
-  const input=new TextInputBuilder().setCustomId('url').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(1000);
+export function recordModal(id,date,url,action='record_submit') {
+  const input=new TextInputBuilder().setCustomId('url').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(1000);
   if(url)input.setValue(url);
-  return new ModalBuilder().setCustomId('meeting:record_submit:'+id).setTitle(date+' 會議記錄')
-    .addLabelComponents(new LabelBuilder().setLabel('會議記錄連結（HTTPS）').setTextInputComponent(input));
+  return new ModalBuilder().setCustomId('meeting:'+action+':'+id).setTitle(date+' 會議記錄')
+    .addLabelComponents(new LabelBuilder().setLabel('會議記錄連結（HTTPS）').setDescription('留空可清除連結').setTextInputComponent(input));
 }

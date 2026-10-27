@@ -4,13 +4,15 @@ import {TaskCreationService,creationInput} from './create-service.js';
 import {createTaskModal,createTaskPreview,creationCheckControls,safeTaskText,taskDateControls,taskDateCursor} from './create-ui.js';
 import {isTeamTaskChannel,teamChannelIds} from './scope.js';
 import {taskConfig,trelloTasks} from './trello.js';
+import {assigneeIds} from './owners.js';
 
 const userPermissions=[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.SendMessages,PermissionFlagsBits.SendMessagesInThreads];
 const botPermissions=[...userPermissions,PermissionFlagsBits.CreatePublicThreads];
 const errors={
   create_forbidden:'請在設定允許的隊長／幹部文字頻道操作；限能查看及發言的授權成員。',
   create_bot_permissions:'Bot 需要查看頻道、讀取歷史、傳送訊息、建立公開討論串與在討論串發言的權限。',
-  create_invalid_members:'請選擇可查看此頻道的人類成員：Owner 1–5 位、Assignee 1 位。',
+  create_invalid_members:'請選擇可查看此頻道的人類成員：Owner 與 Assignee 各 1–5 位。',
+  task_invalid_assigner:'請選擇 1–5 位可查看此頻道的人類成員作為 Assignee。',
   create_invalid_title:'請填入任務名稱（單行，最多 100 字）。',
   task_invalid_description:'請填入任務描述（最多 4000 字），勿使用系統保留標記。',
   task_date_order:'截止日期不能早於開始日期，請重新選擇。',
@@ -31,7 +33,7 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
     const actor=await channel.guild.members.fetch({user:row.actor_id,force:true});
     if(!canManage(actor)||!channel.permissionsFor(actor)?.has(userPermissions))throw new Error('create_forbidden');
     if(!channel.permissionsFor(client.user)?.has(botPermissions))throw new Error('create_bot_permissions');
-    for(const id of new Set([...(row.input?.ids||[]),row.input?.assigner].filter(Boolean))) {
+    for(const id of new Set([...(row.input?.ids||[]),...(row.input?assigneeIds(row.input.assigner):[])])) {
       const member=await channel.guild.members.fetch({user:id,force:true});
       if(member.user.bot || !channel.permissionsFor(member)?.has(userPermissions))throw new Error('create_invalid_members');
     }
@@ -45,11 +47,11 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
     createThread:async row=>(await authorize(row)).threads.create({name:row.input.title,type:ChannelType.PublicThread,autoArchiveDuration:10080}),
     notify:async row=>{
       await authorize(row);
-      const thread=await client.channels.fetch(row.thread_id,{force:true}),input=row.input;
-      return thread.send({content:'✅ 任務已建立。\nOwner：'+input.ids.map(id=>'<@'+id+'>').join(' ')+'\nAssignee：<@'+input.assigner+'>\n開始：'+(input.start||'未設定')+'｜截止：'+(input.due||'未設定')+
+      const thread=await client.channels.fetch(row.thread_id,{force:true}),input=row.input,assignees=assigneeIds(input.assigner);
+      return thread.send({content:'✅ 任務已建立。\nOwner：'+input.ids.map(id=>'<@'+id+'>').join(' ')+'\nAssignee：'+assignees.map(id=>'<@'+id+'>').join(' ')+'\n開始：'+(input.start||'未設定')+'｜截止：'+(input.due||'未設定')+
         '\n狀態：'+safeTaskText(row.list_name||input.status)+'\n後續請在此討論串使用 /任務 查看或更新狀態。',
         embeds:[{title:safeTaskText(input.title),description:safeTaskText(input.description)}],
-        allowedMentions:{parse:[],users:[...new Set([...input.ids,input.assigner])],repliedUser:false},nonce:row.id,enforceNonce:true});
+        allowedMentions:{parse:[],users:[...new Set([...input.ids,...assignees])],repliedUser:false},nonce:row.id,enforceNonce:true});
     },
   }});
   let active=0;
@@ -93,11 +95,11 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
       if(action==='cancel'&&i.isButton()) {drafts.delete(id);return await i.update({content:'已取消，未建立任務。',embeds:[],components:[],allowedMentions:{parse:[]}});}
       if(action==='details'&&i.isModalSubmit()) {
         await i.deferUpdate();
-        const ids=i.fields.getField('owners').values,assigner=i.fields.getField('assignee').values?.[0];
+        const ids=i.fields.getField('owners').values,assigner=i.fields.getField('assignee').values;
         const input=creationInput({...d.input,title:i.fields.getTextInputValue('title'),description:i.fields.getTextInputValue('description'),ids,assigner,status:i.fields.getStringSelectValues('status')[0]});
         if(!d.lists.some(l=>l.id===input.status))throw new Error('task_invalid_status');
         const channel=await authorize({...scope(i),input}),names={};
-        for(const user of new Set([...ids,assigner]))names[user]=(await channel.guild.members.fetch({user,force:true})).displayName;
+        for(const user of new Set([...input.ids,...input.assigner]))names[user]=(await channel.guild.members.fetch({user,force:true})).displayName;
         d.input={...input,names};
         return await i.editReply(createTaskPreview(id,d));
       }
