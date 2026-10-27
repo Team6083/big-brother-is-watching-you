@@ -15,6 +15,8 @@ import {serveHealth} from '../src/health.js';
 import {MongoCreationStore} from '../src/state/creations.js';
 import {TaskCreationService} from '../src/tasks/create-service.js';
 import {migrationFailure} from '../src/state/diagnostics.js';
+import {MongoBankStore} from '../src/state/bank.js';
+import {BankMonitor} from '../src/bank/monitor.js';
 
 test('MongoDB replica-set integration', {timeout:360000},async t=>{
   const replica=await MongoMemoryReplSet.create({binary:{version:process.env.MONGOMS_VERSION||'8.0.17'},instanceOpts:[{launchTimeout:60000}],replSet:{count:1,storageEngine:'wiredTiger',spawn:{windowsHide:true},auth:{enable:true,customRootName:'test_root',customRootPwd:'test-root-password'}}});
@@ -205,6 +207,36 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await creation.attachThread(id,teamThread);await db.collection('proposals').insertOne({_id:teamThread,guild_id:guild,forum_id:forum,status:'pending'});
     await assert.rejects(creation.finish(id,{id:'dddddddddddddddddddddddd',shortUrl:'https://trello.com/c/example2'}),/create_binding_conflict/);
     assert.equal((await creation.get(id)).state,'card_pending');assert.equal((await queue.get(teamThread)).status,'pending');
+  });
+  await t.test('Bank baseline, atomic claim and receipts survive store and monitor restarts',async()=>{
+    const bank=new MongoBankStore(db),source='synthetic_bank_source',tasks=[{id:'1',active:true,url:'https://bank.example.org/mission/1'}];
+    assert.deepEqual(await bank.recordSnapshot(source,tasks,now),{initial:true,queued:0});assert.equal(await bank.claim(source,now),null);
+    tasks.push({id:'2',active:true,url:'https://bank.example.org/mission/2'});
+    assert.deepEqual(await bank.recordSnapshot(source,tasks,now),{initial:false,queued:1});
+    const claims=await Promise.all([bank.claim(source,now),new MongoBankStore(db).claim(source,now)]);assert.equal(claims.filter(Boolean).length,1);
+    const row=claims.find(Boolean);await bank.sent(row,actor);assert.equal(await new MongoBankStore(db).claim(source,now),null);
+    assert.deepEqual(await bank.recordSnapshot(source,tasks.map(t=>({...t,title:'Updated'})),now),{initial:false,queued:0});
+    const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000180',DISCORD_GUILD_ID:guild};
+    let current=[tasks[0]],sends=0;
+    const options={state:db,env,log:()=>{},now:()=>now,read:async()=>current,discord:{verify:async()=>{},findSent:async()=>[],send:async()=>{sends++;return {id:actor};}}};
+    await new BankMonitor(options).tick();assert.equal(sends,0);current=tasks;
+    await new BankMonitor(options).tick();await new BankMonitor(options).tick();assert.equal(sends,1);
+  });
+  await t.test('Bank restart reconciles ambiguous sends by history without another POST',async()=>{
+    const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000181',DISCORD_GUILD_ID:guild};
+    let current=[],posts=0;
+    const options={state:db,env,log:()=>{},now:()=>now,read:async()=>current,discord:{verify:async()=>{},findSent:async rows=>rows.map(row=>({row,id:actor})),send:async()=>{posts++;throw Error('lost acknowledgment');}}};
+    await new BankMonitor(options).tick();current=[{id:'3',active:true,url:'https://bank.example.org/mission/3'}];
+    await new BankMonitor(options).tick();assert.equal(posts,1);
+    await new BankMonitor(options).tick();assert.equal(posts,1);
+    const rows=await db.collection('bank_notifications').find({task_id:'3'}).toArray();assert.equal(rows[0].state,'sent');assert.equal(rows[0].message_id,actor);
+  });
+  await t.test('Bank interrupted send is recovered only after lease expiry',async()=>{
+    const bank=new MongoBankStore(db),source='synthetic_bank_crash';
+    await bank.recordSnapshot(source,[],now);await bank.recordSnapshot(source,[{id:'4',active:true}],now);
+    const row=await bank.claim(source,now);await bank.recover(source,now+119999);assert.equal((await bank.uncertain(source)).length,0);
+    await bank.recover(source,now+120000);assert.equal((await bank.uncertain(source)).length,1);assert.equal(await bank.claim(source,now+120000),null);
+    await bank.sent(row,actor);assert.equal((await bank.uncertain(source)).length,0);
   });
 });
 

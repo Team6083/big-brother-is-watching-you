@@ -2,7 +2,7 @@
 
 Discord 專案管理 Bot。成員在 Discord 討論及更新任務，Trello 保存正式任務資料，MongoDB replica set 保存同步、去重、提醒與會議狀態。
 
-**只需一個常駐程序：`npm start`。** Discord 指令、論壇提案、會議提醒，以及 PM 定時追蹤在同一程序內運作，共用一組 MongoDB 連線；啟用 `PM_ENABLED=true` 就會排程 PM，不需另外啟動 PM worker。
+**只需一個常駐程序：`npm start`。** Discord 指令、論壇提案、會議提醒、PM 定時追蹤及選用的 Bank 新任務通知在同一程序內運作，共用一組 MongoDB 連線；啟用 `PM_ENABLED=true` 就會排程 PM，不需另外啟動 PM worker。
 
 ## 功能
 
@@ -14,8 +14,9 @@ Discord 專案管理 Bot。成員在 Discord 討論及更新任務，Trello 保�
 - 會議設定／編輯內填寫會議記錄連結；過去日期可從 `/會議設定` 的「既有會議記錄」補登。`/查看會議記錄` 從已登錄日期查詢連結。
 - 取消會議集中在「編輯會議」，二次確認後才停止後續提醒。
 - 重連後補抓啟用之後漏掉的論壇文章，保留持久化去重。
+- 選用 Bank 新任務通知：定期唯讀查詢網站任務清單，將啟用後偵測到的新任務摘要及原始連結送到指定文字頻道；首次啟用不補發歷史任務。
 
-AI 分析、自動決策與對外公告尚未實作。
+AI 分析、自動決策及 AI 代為發布公告尚未實作。
 
 ## 開發與執行
 
@@ -66,6 +67,9 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `PM_ENABLED` | 在主 Bot 啟用 PM 定時提醒，預設 false |
 | `PM_INTERVAL_MS` | 掃描間隔，預設 60000；允許 60000～86400000 |
 | `PM_TRELLO_AUTOMATION_MEMBER_IDS` | 排除的自動化成員，逗號分隔 |
+| `BANK_ENABLED` | 在主 Bot 啟用 Bank 新任務通知，預設 false |
+| `BANK_BASE_URL` | Bank 來源網站的 HTTPS 根網址，例如 `https://bank.example.org` |
+| `BANK_CHANNEL_ID` | Bank 任務通知的 Discord 文字頻道 ID |
 | `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 會議頻道及提及角色，兩者都提供才啟用 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
@@ -82,6 +86,14 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 5. 實際確認建卡並保存綁定後，才在新討論串張貼描述、日期與狀態並 @Owner／Assignee。後續在此使用 `/任務`；PM 的到期提醒也留在此討論串。
 
 本次新增建立表單的日期全部使用選單；既有 `/任務` 的修改表單仍沿用原本的日期欄位。未確認建立前的草稿保留 15 分鐘，重啟後須重填；已送出的操作及建卡核對紀錄保存在 MongoDB。
+
+## Bank 新任務通知
+
+完整設定、去重與驗收步驟見 [Bank 新任務通知](docs/bank-notifications.md)。啟用 `BANK_ENABLED=true` 並設定來源及通知頻道後，主 Bot 每天台灣時間 **06:00、17:00** 讀取網站的 `/api/gas-read?type=missionsList`，與伺服器時區無關。啟動及重啟均等待下一個時段；不需要 Bank API Key，也不經 Make。此功能不新增付費服務。
+
+第一次完整讀取成功時只保存既有任務 ID。之後新 ID 若狀態為「進行中」或「即將截止」，且截止日期空白或尚未超過台灣當日，就會公告標題、描述、分類、類型、日期、獎勵及 `/mission/{id}` 原始連結。既有 ID 編輯或重開不會重發，不提及 @everyone。開始日期不是發布時間；未來才開始的新任務也可預告。
+
+來源 API 沒有發布時間欄位，因此這是偵測「新出現的任務 ID」。首次排程只記錄基準，之後新任務在下一個檢查時段公告，另受來源快取與網路延遲影響；停機錯過時段會等重啟後的下一個時段，不補跑每個錯過的時段。舊的 `BANK_INTERVAL_MS` 設定已移除。升級需先執行 `npm run migrate` 建立 `bank_notifications` collection；部署及真實網站／Discord 驗收尚需由部署負責人執行。
 
 ## Discord 與 Make
 

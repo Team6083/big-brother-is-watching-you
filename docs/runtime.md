@@ -21,7 +21,7 @@
 
 使用官方 `mongodb` driver，不使用 Mongoose，也沒有 SQL 翻譯介面。`src/state/` 提供具名資料操作；runtime 不呼叫 `prepare(sql)`。
 
-九個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`task_creations`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`。升級後先執行 `npm run migrate`，建立新增的 `task_creations`；runtime 的 `check` 會確認它存在。
+十個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`task_creations`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`、`bank_notifications`。升級後先執行 `npm run migrate`，建立缺少的 collection；runtime 的 `check` 會確認必要 collection 及索引存在。
 
 - Discord ID 及卡片 ID 都是字串；毫秒 timestamp 是 JS 安全整數。
 - `_id` 保存 Thread ID、Interaction ID、delivery key 或由 channel／date 等欄位組成的識別碼。
@@ -30,6 +30,7 @@
 - 文字頻道建立任務以草稿操作 ID 作為 `task_creations._id`，在建立 Discord 討論串前就原子保留。`thread_pending`／`card_pending` 保存結果不明的操作；只有確認完整卡片欄位後才在 transaction 中一起保存提案綁定及 `succeeded`。重啟後可核對，不自動重送建立請求。通知另以 pending→sending→sent 記錄，sending 不重送。
 - 會議設定／取消與日期歷史使用 transaction。callback 只含資料庫操作，可安全由 driver 重試，沒有 Discord／Trello 副作用。
 - 不設 TTL 刪除去重、會議或提醒歷史。
+- Bank 新任務通知的首次清單基準與各任務 ID 在 transaction 中保存。發送前原子取得工作，回應不明時僅核對最近公告，不自動重送。與 Gateway 共用主程序及 MongoDB，停止時一起排空。
 - 狀態由 store 方法檢查並限定寫入值，不要求 collection validator。直接手動改 DB 不受此層驗證保護。
 
 ### 連線與權限

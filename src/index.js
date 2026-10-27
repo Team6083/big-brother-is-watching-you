@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import { openStore } from './state/queue.js';
 import { MongoMeetingStore } from './state/meetings.js';
 import { PmMonitor } from './pm/monitor.js';
+import {BankMonitor} from './bank/monitor.js';
 import { serveHealth } from './health.js';
 import { createClient, createDiscordAdapter, registerEvents } from './discord.js';
 import { sendProposal } from './webhook.js';
@@ -14,7 +15,7 @@ import { registerTaskInteractions } from './tasks/interactions.js';
 import {registerTeamTaskCreation} from './tasks/create-interactions.js';
 import { registerMeetings } from './meetings.js';
 
-let client, store, timer, heartbeat, worker, taskInteractions, taskCreation, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, health, stopping = false;
+let client, store, timer, heartbeat, worker, taskInteractions, taskCreation, recovery, recoveryTimer, meetings, meetingTimer, pm, pmTimer, bank, health, stopping = false;
 async function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -24,11 +25,12 @@ async function shutdown(code = 0) {
   clearInterval(meetingTimer);
   clearInterval(pmTimer);
   pm?.stop();
+  bank?.stop();
   client?.removeAllListeners(Events.InteractionCreate);
   client?.removeAllListeners(Events.ThreadCreate);
   const deadline = setTimeout(() => process.exit(1), 25_000);
   deadline.unref();
-  while (worker?.running || taskInteractions?.running || taskCreation?.running || recovery?.running || meetings?.running || pm?.running) await new Promise(resolve => setTimeout(resolve, 100));
+  while (worker?.running || taskInteractions?.running || taskCreation?.running || recovery?.running || meetings?.running || pm?.running || bank?.running) await new Promise(resolve => setTimeout(resolve, 100));
   await client?.destroy();
   await health?.close();
   await store?.close();
@@ -48,6 +50,7 @@ try {
   await new MongoMeetingStore(store.db).recoverSending(config.meetingChannelId);
   pm=new PmMonitor({state:store.db,log});
   client = createClient();
+  bank=new BankMonitor({state:store.db,client,log});
   health=await serveHealth({ready:()=>!stopping&&client.isReady(),alive:()=>!stopping});
   const discord = createDiscordAdapter(client, config);
   worker = new Worker({ store, config, discord, send: proposal => sendProposal(proposal, config), log });
@@ -80,6 +83,7 @@ try {
         pmTimer=setInterval(pmTick,pm.intervalMs);
         pmTick();
       }
+      bank.start();
       void recovery.tick(true);
       log('bot_ready');
       tick();
