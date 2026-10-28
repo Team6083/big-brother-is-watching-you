@@ -56,7 +56,7 @@ export class BankMonitor {
       while(!this.stopping) {
         const row=await this.store.claim(this.config.sourceKey,this.now());if(!row)break;
         const task=current.get(row.task_id);
-        if(!task?.active){await this.store.finish(row,'ignored',{last_error:'bank_task_not_open'});continue;}
+        if(!task?.active){await this.store.finish(row,task?.waiting?'waiting':'ignored',{last_error:task?.waiting?'bank_task_waiting':'bank_task_not_open'});continue;}
         try {
           const message=await this.discord.send(row,task);
           if(!/^\d{17,20}$/.test(message?.id||''))throw new Error('bank_send_uncertain');

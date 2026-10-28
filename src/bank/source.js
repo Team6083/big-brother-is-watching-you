@@ -26,9 +26,11 @@ export function normalizeMissions(rows,config,now=Date.now()) {
       !['title','description','status','startDate','deadline','category','type','rewardType','rewardItem'].every(key=>typeof row[key]==='string')||
       !row.title.trim()||!Number.isFinite(row.reward)||row.reward<0||!validDate(row.startDate)||!validDate(row.deadline))throw new Error('bank_invalid_response');
     ids.add(row.id);
+    const open=['進行中','即將截止'].includes(row.status),started=!row.startDate||row.startDate<=today,unexpired=!row.deadline||row.deadline>=today;
     return {id:String(row.id),title:row.title.trim(),description:row.description,category:row.category,type:row.type,
       status:row.status,startDate:row.startDate,deadline:row.deadline,reward:row.reward,rewardType:row.rewardType,rewardItem:row.rewardItem,
-      url:config.baseUrl+'/mission/'+row.id,active:['進行中','即將截止'].includes(row.status)&&(!row.deadline||row.deadline>=today)};
+      url:config.baseUrl+'/mission/'+row.id,active:open&&started&&unexpired,
+      waiting:unexpired&&(['','未發布','即將開始'].includes(row.status)||open&&!started)};
   });
 }
 
