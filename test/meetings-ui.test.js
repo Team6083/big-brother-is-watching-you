@@ -32,9 +32,9 @@ function harness(now=Date.now) {
   const db=new DatabaseSync(':memory:');let handler;
   const channel={guildId:'guild',type:0,permissionsFor:()=>({has:()=>true}),guild:{roles:{fetch:async()=>({mentionable:true})}}};
   registerMeetings({on:(_,fn)=>{handler=fn;},channels:{fetch:async()=>channel},user:{}},{db},{guildId:'guild'},()=>{},{now});
-  async function run({command,action,values,fields,user='actor',id='draft'}) {
+  async function run({command,action,values,fields,user='actor',id='draft',channelId=meetingChannelId,canUse=true,guildId='guild',bot=false}) {
     let result,modal;
-    const i={id,guildId:'guild',channelId:meetingChannelId,channel,user:{id:user},member:{},values,
+    const i={id,guildId,channelId,channel:{...channel,id:channelId,permissionsFor:()=>({has:()=>canUse})},user:{id:user,bot},member:{},values,
       commandName:command,customId:action,isChatInputCommand:()=>!!command,isButton:()=>!!action&&!values&&!fields,
       isStringSelectMenu:()=>!!values,isModalSubmit:()=>!!fields,fields,
       deferReply:async()=>{i.deferred=true;},deferUpdate:async()=>{i.deferred=true;},
@@ -180,4 +180,34 @@ test('a stale cancellation form cannot cancel a revised meeting and pending link
   await run({action:'meeting:open_edit',id:'cancel'});await run({action:'meeting:cancel:cancel'});
   store.set(meetingChannelId,'2026-10-27','18:00','other','New room',now,'19:30');
   const rejected=await run({action:'meeting:confirm_cancel:cancel'});assert.match(rejected.result.content,/資料已變更/);assert.equal(store.get(meetingChannelId).status,'pending');db.close();
+});
+
+for(const channelId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team channel '+channelId+' can set, edit, cancel and read the shared meeting',async()=>{
+  const now=Date.parse('2026-10-23T10:00:00+08:00'),{db,run,fields}=harness(()=>now),store=new MeetingStore(db);
+  const act=options=>run({...options,channelId});
+  try {
+    await act({command:'會議設定'});
+    await act({action:'meeting:date:draft',values:['2026-10-26']});
+    await act({action:'meeting:times:draft',fields:fields()});
+    await act({action:'meeting:record_link:draft'});
+    await act({action:'meeting:record_draft:draft',fields:{getTextInputValue:()=> 'https://example.org/notes'}});
+    await act({action:'meeting:save:draft'});
+    assert.equal(store.record(meetingChannelId,'2026-10-26').url,'https://example.org/notes');
+    assert.equal(store.get(meetingChannelId).location,'機器人教室');
+    assert.match((await act({command:'會議查看'})).result.content,/19:00/);
+    assert.ok((await act({command:'查看會議記錄'})).result.components.length);
+    assert.match((await act({action:'meeting:record_date:draft',values:['2026-10-26']})).result.content,/https:\/\/example.org\/notes/);
+    await act({action:'meeting:open_edit',id:'edit'});
+    await act({action:'meeting:cancel:edit'});
+    await act({action:'meeting:confirm_cancel:edit'});
+    assert.equal(store.get(meetingChannelId).status,'cancelled');
+    assert.equal(db.prepare('SELECT count(*) n FROM meetings').get().n,1);
+  } finally {db.close();}
+});
+test('meeting commands reject outsiders, bots and members without channel access',async()=>{
+  const {db,run}=harness();
+  try {for(const patch of [{channelId:'900000000000000099'},{channelId:process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')[1],canUse:false},{guildId:'other'},{bot:true}]) {
+    const reply=await run({command:'會議設定',...patch});
+    assert.match(reply.result.content,/隊長／幹部頻道/);
+  }} finally {db.close();}
 });

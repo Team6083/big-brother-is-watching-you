@@ -17,7 +17,7 @@ export function parseDate(value,end=false) {
 export class TaskService {
   constructor({store,proposalStore,trello,config,policy}) { Object.assign(this,{store,proposalStore,trello,config,policy}); }
   canManage(actor) {
-    return !actor.bot && actor.canViewForum && (this.policy.mode==='forum' ||
+    return !actor.bot && actor.canViewForum && (actor.teamTask ? actor.canSend : this.policy.mode==='forum' ||
       (this.policy.mode==='roles' && this.policy.roleIds.some(id=>actor.roles?.includes(id))));
   }
   async context(thread,actor) {
