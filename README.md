@@ -57,10 +57,10 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `MAKE_WEBHOOK_URL`、`MAKE_WEBHOOK_API_KEY` | 私密 Webhook 及選用驗證金鑰 |
 | `MONGODB_URI` | MongoDB 連線字串，機密；路徑必須包含專用 database 名稱，取代舊 `DATABASE_URL` |
 | `DISCORD_NOTIFY` | 提案成功回覆，預設 true |
-| `TASK_CONTROLS_ENABLED` | 啟用任務控制，預設 false；建立任務另需設定允許頻道 |
-| `TASK_MANAGEMENT_MODE` | `forum`：可查看論壇成員；`roles`：限定角色 |
+| `TASK_CONTROLS_ENABLED` | 啟用任務控制，預設 false；文字頻道操作另需設定允許頻道 |
+| `TASK_MANAGEMENT_MODE` | 提案論壇管理權限：`forum` 為可查看成員，`roles` 為限定角色；隊長／幹部頻道依 Discord 頻道權限 |
 | `TASK_MANAGER_ROLE_IDS` | `roles` 模式允許的角色，逗號分隔 |
-| `TASK_ALLOWED_CHANNEL_IDS` | 可用 `/建立任務` 的隊長／幹部文字頻道 ID，逗號分隔；留空停用 |
+| `TASK_ALLOWED_CHANNEL_IDS` | 可使用全部任務與會議指令的隊長／幹部文字頻道 ID，逗號分隔；成員依現有頻道權限操作 |
 | `TRELLO_BOARD_ID`、`TRELLO_API_KEY` | 看板與 API Key |
 | `TRELLO_WRITE_TOKEN` | 任務更新用 read/write Token，機密 |
 | `TRELLO_READ_TOKEN` | PM 查詢用 Token，機密 |
@@ -70,7 +70,7 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `BANK_ENABLED` | 在主 Bot 啟用 Bank 新任務通知，預設 false |
 | `BANK_BASE_URL` | Bank 來源網站的 HTTPS 根網址，例如 `https://bank.example.org` |
 | `BANK_CHANNEL_ID` | Bank 任務通知的 Discord 文字頻道 ID |
-| `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 會議頻道及提及角色，兩者都提供才啟用 |
+| `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 共用會議的提醒頻道及提及角色，兩者都提供才啟用；也可從允許的隊長／幹部頻道管理 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
 URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。資料庫名稱放在 URI 路徑，例如 `mongodb://localhost/botdb?replicaSet=rs0&authSource=admin`（僅為格式示例）。名稱限 1–63 個英數字、底線或連字號；省略名稱或使用 `test` 都會拒絕啟動，避免誤寫 driver 的預設資料庫。`authSource` 是獨立的認證來源，請依帳號設定；runtime 使用 URI 指定的 database。一般聊天不會自動轉成任務，必須明確操作 `/建立任務`。
@@ -108,7 +108,7 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 
 ## 查看與編輯會議
 
-在隊長頻道使用 `/會議查看` 可查看會議日期、開始／結束時間、地點，以及提醒狀態。尚未開始的有效會議會有「編輯會議」按鈕；儲存設定後也保留此按鈕。
+在隊長／幹部頻道使用 `/會議查看` 可查看會議日期、開始／結束時間、地點，以及提醒狀態。尚未開始的有效會議會有「編輯會議」按鈕；儲存設定後也保留此按鈕。
 
 按「編輯會議」會帶入已儲存資料，可用選單修改日期、開始／結束時間，並修改地點；預覽後按「確認儲存」才會生效。時間為台灣 24 小時制，選單另外標示凌晨／下午，例如 `04` 是凌晨 4 點，`16` 是下午 4 點。取消編輯會保留原設定。
 

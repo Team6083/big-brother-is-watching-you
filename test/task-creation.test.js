@@ -105,13 +105,13 @@ test('lost notice response leaves a durable ambiguous receipt and is never pinge
   await new TaskCreationService({...f.service}).reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});assert.equal(attempts,1);
 });
 
-function interactionFixture(assignees=[assignee]) {
+function interactionFixture(assignees=[assignee],mode='forum') {
   const f=fixture(),members=new Map([actor,owner,assignee,anotherAssignee].map(id=>[id,{user:{id,bot:false},displayName:id===owner?'Owner':'Assignee',roles:{cache:new Map()}}]));
   let handler,result,modal,actorAllowed=true,targetAllowed=true,botAllowed=true;
   const parent={id:channel,guildId:guild,type:0,permissionsFor:member=>({has:()=>member?.id==='bot'?botAllowed:member.user?.id===actor?actorAllowed:targetAllowed}),
     guild:{members:{fetch:async({user})=>members.get(user)}},threads:{create:async()=>{const created=await f.discord.createThread();channels.set(thread,{...created,send:async payload=>{assert.equal((await f.store.get(id)).state,'succeeded');result.notice=payload;return {id:actor};}});return created;}}};
   const channels=new Map([[channel,parent]]),client={user:{id:'bot'},channels:{fetch:async id=>channels.get(id)},on:(event,h)=>{handler=h;}};
-  registerTeamTaskCreation(client,{}, {guildId:guild},()=>{}, {store:f.store,trello:f.trello,policy:{enabled:true,mode:'forum',roleIds:[]},now:()=>Date.parse('2026-10-17T12:00:00+08:00')});
+  registerTeamTaskCreation(client,{}, {guildId:guild},()=>{}, {store:f.store,trello:f.trello,policy:{enabled:true,mode,roleIds:[owner]},now:()=>Date.parse('2026-10-17T12:00:00+08:00')});
   const base={id,guildId:guild,channelId:channel,channel:parent,member:members.get(actor),user:members.get(actor).user,
     isChatInputCommand:()=>false,isButton:()=>false,isStringSelectMenu:()=>false,isModalSubmit:()=>false,
     deferUpdate:async()=>{},deferReply:async payload=>{result.flags=payload.flags;},editReply:async payload=>{result.reply=payload;},update:async payload=>{result.reply=payload;},reply:async payload=>{result.reply=payload;},showModal:async m=>{modal=m.toJSON();}};
@@ -187,4 +187,11 @@ test('date clearing and cancellation do not create any task; stale or foreign fo
   await f.run(f.button('due'));await f.run(f.button('clear'));assert.ok(f.result.reply.content.includes('截止：未設定'));
   await f.run({...f.button('save'),user:{id:owner,bot:false}});assert.equal(f.counts().posts,0);
   await f.run(f.button('cancel'));assert.equal(f.counts().threads,0);await f.run(f.button('save'));assert.ok(f.result.reply.content.includes('表單已過期'));
+});
+
+test('team channel permissions allow creation without the configured manager role',async()=>{
+  const f=interactionFixture([assignee],'roles');
+  await f.run(f.command());await f.run(f.details());await f.run(f.button('save'));
+  assert.deepEqual(f.counts(),{posts:1,threads:1,notices:0});
+  assert.match(f.result.notice.content,/任務已建立/);
 });

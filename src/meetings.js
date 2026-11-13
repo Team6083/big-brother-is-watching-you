@@ -1,5 +1,6 @@
 import {dateOptions,dateControls,timeModal,selectedTimes,previewControls,cancelControls,savedMeetingControls,recordControls,recordModal} from './meetings-ui.js';
 import {MongoMeetingStore} from './state/meetings.js';
+import {isTeamTaskChannel} from './tasks/scope.js';
 import { Events, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
 
 export const meetingChannelId=process.env.MEETING_CHANNEL_ID || '';
@@ -191,8 +192,8 @@ export function registerMeetings(client,proposalStore,config,log,{now=Date.now}=
     if(command?![...meetingCommands.map(c=>c.name),...retiredMeetingCommands].includes(i.commandName):!i.customId?.startsWith('meeting:'))return;
     active++;
     try {
-      if(i.guildId!==config.guildId || i.channelId!==meetingChannelId || i.user.bot ||
-        !i.channel?.permissionsFor(i.member)?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages]))throw new Error('請在隊長頻道內操作；限可查看並發言的成員。');
+      if(i.guildId!==config.guildId || (i.channelId!==meetingChannelId && !isTeamTaskChannel(i.channel,config)) || i.user.bot ||
+        !i.channel?.permissionsFor(i.member)?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages]))throw new Error('請在隊長／幹部頻道內操作；限可查看並發言的成員。');
       if(retiredMeetingCommands.includes(i.commandName))return await i.reply({flags:MessageFlags.Ephemeral,
         content:i.commandName==='會議取消'?'請使用 /會議查看，按「編輯會議」→「取消會議」。':'請使用 /會議設定 內的「既有會議記錄」，或在設定預覽中填「會議記錄連結」。',allowedMentions:{parse:[]}});
       if(i.commandName==='會議設定' || i.customId==='meeting:open_edit') {

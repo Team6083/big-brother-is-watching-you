@@ -26,12 +26,11 @@ const errors={
 export function registerTeamTaskCreation(client,proposalStore,config,log,{policy=taskConfig(),trello,store,now=Date.now}={}) {
   if(!policy.enabled || !teamChannelIds.length)return {get running(){return false;}};
   trello??=trelloTasks(policy);store??=new MongoCreationStore(proposalStore.db);
-  const canManage=member=>!member.user.bot && (policy.mode==='forum'||policy.mode==='roles'&&policy.roleIds.some(id=>member.roles.cache.has(id)));
   async function authorize(row) {
     const channel=await client.channels.fetch(row.channel_id,{force:true});
     if(row.guild_id!==config.guildId || !isTeamTaskChannel(channel,config))throw new Error('create_forbidden');
     const actor=await channel.guild.members.fetch({user:row.actor_id,force:true});
-    if(!canManage(actor)||!channel.permissionsFor(actor)?.has(userPermissions))throw new Error('create_forbidden');
+    if(actor.user.bot||!channel.permissionsFor(actor)?.has(userPermissions))throw new Error('create_forbidden');
     if(!channel.permissionsFor(client.user)?.has(botPermissions))throw new Error('create_bot_permissions');
     for(const id of new Set([...(row.input?.ids||[]),...(row.input?assigneeIds(row.input.assigner):[])])) {
       const member=await channel.guild.members.fetch({user:id,force:true});

@@ -92,7 +92,7 @@ test('meeting commands serialize and reject other private channels',async()=>{
   for(const c of meetingCommands)assert.ok(c.toJSON().name);
   let handler,reply;const db=new DatabaseSync(':memory:');
   registerMeetings({on:(_,fn)=>{handler=fn;}},{db},{guildId:'guild'},()=>{});
-  await handler({isChatInputCommand:()=>true,commandName:'會議設定',guildId:'guild',channelId:'900000000000000010',user:{id:'a'},
+  await handler({isChatInputCommand:()=>true,commandName:'會議設定',guildId:'guild',channelId:'900000000000000099',user:{id:'a'},
     deferReply:async()=>{},editReply:async p=>{reply=p;},reply:async p=>{reply=p;}});
-  assert.match(reply.content,/隊長頻道/);assert.equal(new MeetingStore(db).get(meetingChannelId),undefined);db.close();
+  assert.match(reply.content,/隊長／幹部頻道/);assert.equal(new MeetingStore(db).get(meetingChannelId),undefined);db.close();
 });

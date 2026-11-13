@@ -59,7 +59,7 @@ test('Discord records use only existing dates, keep results private and reject f
   await run({command:'查看會議記錄'});
   const found=(await run({action:'meeting:record_date:draft',values:['2026-10-01']})).result;
   assert.ok(found.content.includes(link));assert.deepEqual(found.allowedMentions,{parse:[]});
-  const denied=(await run({command:'查看會議記錄',channel:'other'})).result;assert.match(denied.content,/隊長頻道/);assert.ok(!denied.content.includes(link));db.close();
+  const denied=(await run({command:'查看會議記錄',channel:'other'})).result;assert.match(denied.content,/隊長／幹部頻道/);assert.ok(!denied.content.includes(link));db.close();
 });
 
 test('scheduled dates remain in history after next meeting; rescheduled future dates disappear',()=>{
