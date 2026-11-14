@@ -6,6 +6,8 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 3 * * 1'
 
 permissions:
   contents: read
@@ -18,24 +20,44 @@ env:
   IMAGE: ghcr.io/team6083/big-brother-is-watching-you
 
 jobs:
-  test:
+  # Finds pre-existing vulnerabilities; does not block PRs (those are checked
+  # by dependency-review in the test job).
+  audit:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version-file: package.json
+      - run: npm audit --audit-level=high
+
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: package.json
           cache: npm
       - run: npm ci
+      # PRs are only blocked by vulnerabilities they introduce.
+      - if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
       - run: npm run audit:public
       - run: npm test
 
   image:
     needs: test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -56,13 +78,44 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-      - uses: docker/build-push-action@v7
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
           push: ${{ steps.push.outputs.value == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_COMMIT=${{ github.sha }}
+          sbom: ${{ steps.push.outputs.value == 'true' && vars.ENABLE_SIGNING == 'true' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Signing and SBOM are opt-in: set the repo variable ENABLE_SIGNING=true.
+      # Keep it off for private repos: keyless signing writes the repo name,
+      # workflow path and commit to the public Rekor transparency log.
+      - if: steps.push.outputs.value == 'true' && vars.ENABLE_SIGNING == 'true'
+        uses: sigstore/cosign-installer@v3
+      - if: steps.push.outputs.value == 'true' && vars.ENABLE_SIGNING == 'true'
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          case "$GITHUB_REF_NAME" in *-*) flag=--prerelease ;; *) flag= ;; esac
+          # Idempotent: a re-run must not fail because the release exists.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag $flag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
