@@ -95,7 +95,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # Signing and SBOM are opt-in: set the repo variable ENABLE_SIGNING=true.
-      # Keep it off while the repo is private (keyless signing is public in Rekor).
+      # Keep it off for private repos: keyless signing writes the repo name,
+      # workflow path and commit to the public Rekor transparency log.
       - if: steps.push.outputs.value == 'true' && vars.ENABLE_SIGNING == 'true'
         uses: sigstore/cosign-installer@v3
       - if: steps.push.outputs.value == 'true' && vars.ENABLE_SIGNING == 'true'
@@ -113,6 +114,8 @@ jobs:
       - uses: actions/checkout@v7
       - run: |
           case "$GITHUB_REF_NAME" in *-*) flag=--prerelease ;; *) flag= ;; esac
-          gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag $flag
+          # Idempotent: a re-run must not fail because the release exists.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag $flag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

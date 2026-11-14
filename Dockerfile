@@ -21,4 +21,6 @@ ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT
 
 # Numeric UID:GID so Kubernetes runAsNonRoot can verify it.
 USER 65532:65532
+# UID 65532 has no home directory; give tools a HOME that exists.
+ENV HOME=/tmp
 CMD ["node", "src/index.js"]
