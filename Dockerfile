@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:24-slim
+FROM node:25-slim
 
 ENV NODE_ENV=production
 WORKDIR /app
