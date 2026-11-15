@@ -58,9 +58,10 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `MONGODB_URI` | MongoDB 連線字串，機密；路徑必須包含專用 database 名稱，取代舊 `DATABASE_URL` |
 | `DISCORD_NOTIFY` | 提案成功回覆，預設 true |
 | `TASK_CONTROLS_ENABLED` | 啟用任務控制，預設 false；文字頻道操作另需設定允許頻道 |
-| `TASK_MANAGEMENT_MODE` | 提案論壇管理權限：`forum` 為可查看成員，`roles` 為限定角色；隊長／幹部頻道依 Discord 頻道權限 |
+| `TASK_MANAGEMENT_MODE` | 任務管理權限：`forum` 為可查看成員，`roles` 為限定角色；隊長／幹部頻道預設也遵守此設定 |
 | `TASK_MANAGER_ROLE_IDS` | `roles` 模式允許的角色，逗號分隔 |
-| `TASK_ALLOWED_CHANNEL_IDS` | 可使用全部任務與會議指令的隊長／幹部文字頻道 ID，逗號分隔；成員依現有頻道權限操作 |
+| `TASK_ALLOWED_CHANNEL_IDS` | 隊長／幹部任務文字頻道 ID，逗號分隔；留空停用 |
+| `TEAM_CHANNEL_ACCESS_ENABLED` | 預設 false，保留舊權限；明確設為 true 且任務控制啟用後，上述頻道依 Discord 權限使用全部任務／會議功能，不額外要求管理角色 |
 | `TRELLO_BOARD_ID`、`TRELLO_API_KEY` | 看板與 API Key |
 | `TRELLO_WRITE_TOKEN` | 任務更新用 read/write Token，機密 |
 | `TRELLO_READ_TOKEN` | PM 查詢用 Token，機密 |
@@ -70,7 +71,7 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `BANK_ENABLED` | 在主 Bot 啟用 Bank 新任務通知，預設 false |
 | `BANK_BASE_URL` | Bank 來源網站的 HTTPS 根網址，例如 `https://bank.example.org` |
 | `BANK_CHANNEL_ID` | Bank 任務通知的 Discord 文字頻道 ID |
-| `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 共用會議的提醒頻道及提及角色，兩者都提供才啟用；也可從允許的隊長／幹部頻道管理 |
+| `MEETING_CHANNEL_ID`、`MEETING_ROLE_ID` | 共用會議的提醒頻道及提及角色，兩者都提供才啟用；開啟 `TEAM_CHANNEL_ACCESS_ENABLED` 後也可從允許的隊長／幹部頻道管理 |
 | `PORT`、`HOST` | 選用健康檢查；HOST 預設 0.0.0.0 |
 
 URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿關閉憑證驗證。資料庫名稱放在 URI 路徑，例如 `mongodb://localhost/botdb?replicaSet=rs0&authSource=admin`（僅為格式示例）。名稱限 1–63 個英數字、底線或連字號；省略名稱或使用 `test` 都會拒絕啟動，避免誤寫 driver 的預設資料庫。`authSource` 是獨立的認證來源，請依帳號設定；runtime 使用 URI 指定的 database。一般聊天不會自動轉成任務，必須明確操作 `/建立任務`。
@@ -116,7 +117,7 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 
 在編輯畫面按「取消會議」後，還要按「確認取消會議」才生效；返回編輯或取消本次設定都不會取消原會議。取消只停止該會議後續提醒，保留會議記錄與已發出的訊息。
 
-部署新版後，以正式環境設定執行一次 `npm run tasks:register`，移除獨立的 `/會議記錄設定`、`/會議取消` 指令。保留 `/會議設定`、`/會議查看`、`/查看會議記錄`；不需要新增環境變數或 collection。
+部署新版後，以正式環境設定執行一次 `npm run tasks:register`，移除獨立的 `/會議記錄設定`、`/會議取消` 指令。保留 `/會議設定`、`/會議查看`、`/查看會議記錄`；會議資料不需新增 collection。要從兩個允許頻道管理，另明確啟用 `TEAM_CHANNEL_ACCESS_ENABLED=true`。
 
 提醒固定在前一天 17:00。已發出提醒後，仍可在會議開始前修改同一天的時間與地點，並保留提醒紀錄；不會重發或更新原提醒，需由操作者告知出席成員。改成另一個未來日期會重新安排提醒。新會議仍須在前一天 17:00 前設定。發送中、會議已取消／開始或資料已被其他操作修改時，舊編輯表單不能覆蓋設定。
 

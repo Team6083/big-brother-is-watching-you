@@ -28,10 +28,13 @@ test('end must be later on the same day and minute choices are validated',()=>{
   assert.equal(meetingEnd('2026-10-20','19:00','20:30'),Date.parse('2026-10-20T20:30:00+08:00'));
   assert.throws(()=>selectedTimes({getStringSelectValues:()=>['99']}));
 });
-function harness(now=Date.now) {
+function harness(now=Date.now,{tasks=false,access=false}={}) {
   const db=new DatabaseSync(':memory:');let handler;
   const channel={guildId:'guild',type:0,permissionsFor:()=>({has:()=>true}),guild:{roles:{fetch:async()=>({mentionable:true})}}};
+  const saved={tasks:process.env.TASK_CONTROLS_ENABLED,access:process.env.TEAM_CHANNEL_ACCESS_ENABLED};
+  process.env.TASK_CONTROLS_ENABLED=String(tasks);process.env.TEAM_CHANNEL_ACCESS_ENABLED=String(access);
   registerMeetings({on:(_,fn)=>{handler=fn;},channels:{fetch:async()=>channel},user:{}},{db},{guildId:'guild'},()=>{},{now});
+  for(const [key,value] of [['TASK_CONTROLS_ENABLED',saved.tasks],['TEAM_CHANNEL_ACCESS_ENABLED',saved.access]]) {if(value===undefined)delete process.env[key];else process.env[key]=value;}
   async function run({command,action,values,fields,user='actor',id='draft',channelId=meetingChannelId,canUse=true,guildId='guild',bot=false}) {
     let result,modal;
     const i={id,guildId,channelId,channel:{...channel,id:channelId,permissionsFor:()=>({has:()=>canUse})},user:{id:user,bot},member:{},values,
@@ -183,7 +186,7 @@ test('a stale cancellation form cannot cancel a revised meeting and pending link
 });
 
 for(const channelId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team channel '+channelId+' can set, edit, cancel and read the shared meeting',async()=>{
-  const now=Date.parse('2026-10-23T10:00:00+08:00'),{db,run,fields}=harness(()=>now),store=new MeetingStore(db);
+  const now=Date.parse('2026-10-23T10:00:00+08:00'),{db,run,fields}=harness(()=>now,{tasks:true,access:true}),store=new MeetingStore(db);
   const act=options=>run({...options,channelId});
   try {
     await act({command:'會議設定'});
@@ -210,4 +213,14 @@ test('meeting commands reject outsiders, bots and members without channel access
     const reply=await run({command:'會議設定',...patch});
     assert.match(reply.result.content,/隊長／幹部頻道/);
   }} finally {db.close();}
+});
+
+for(const options of [{},{tasks:false,access:true},{tasks:true,access:false}])test('team meeting access requires both switches: '+JSON.stringify(options),async()=>{
+ const {db,run}=harness(Date.now,options);
+ try {
+  const denied=await run({command:'會議設定',channelId:process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')[1]});
+  assert.match(denied.result.content,/隊長／幹部頻道/);
+  assert.equal(db.prepare('SELECT count(*) n FROM meetings').get().n,0);
+  assert.match((await run({command:'會議設定'})).result.content,/選擇會議日期/);
+ } finally {db.close();}
 });

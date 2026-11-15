@@ -17,8 +17,10 @@ export function parseDate(value,end=false) {
 export class TaskService {
   constructor({store,proposalStore,trello,config,policy}) { Object.assign(this,{store,proposalStore,trello,config,policy}); }
   canManage(actor) {
-    return !actor.bot && actor.canViewForum && (actor.teamTask ? actor.canSend : this.policy.mode==='forum' ||
-      (this.policy.mode==='roles' && this.policy.roleIds.some(id=>actor.roles?.includes(id))));
+    if(actor.bot || !actor.canViewForum || (actor.teamTask && !actor.canSend))return false;
+    // Preserve legacy roles unless this deployment explicitly trusts team-channel permissions.
+    if(actor.teamTask && this.policy.teamChannelAccess)return true;
+    return this.policy.mode==='forum' || (this.policy.mode==='roles' && this.policy.roleIds.some(id=>actor.roles?.includes(id)));
   }
   async context(thread,actor) {
     if(!isTaskThread(thread,this.config) || !snowflake(thread.id) || actor.bot || !actor.canViewForum)throw new Error('task_outside_forum');

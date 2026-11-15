@@ -404,7 +404,7 @@ test('invalid description in task settings prevents all personnel, date and stat
 for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team channel '+parentId+' manages its bound task without manager roles',async()=>{
  const saved={...process.env},priorFetch=globalThis.fetch,f=fixture();fullEdit(f);
  let handler,panel,modal,reply,parentAllowed=true,threadAllowed=true;
- Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'roles',TASK_MANAGER_ROLE_IDS:other,TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
+ Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'roles',TASK_MANAGER_ROLE_IDS:other,TEAM_CHANNEL_ACCESS_ENABLED:'true',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
  const parent={id:parentId,guildId:guild,type:0,permissionsFor:()=>({has:()=>parentAllowed})};
  const channel={...f.thread,parentId,permissionsFor:()=>({has:()=>threadAllowed}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user})}}};
  globalThis.fetch=async(url,options)=>{
@@ -422,7 +422,7 @@ for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team
   await open('https://discord.com/channels/'+guild+'/'+threadId);
   assert.match(panel.content,/任務操作/);
   const buttons=panel.components[0].toJSON().components;
-  const button=async action=>handler({...base,customId:buttons.find(c=>c.custom_id.startsWith('task:'+action+':')).custom_id,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
+  const button=async action=>handler({...base,customId:buttons.find(c=>c.custom_id.startsWith('task:'+action+':')||c.custom_id.startsWith('task:'+action+'_thread:')).custom_id,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
   await button('view');assert.equal(reply.embeds[0].title,f.card.name||'');
   await button('edit');assert.equal(modal.title,'任務設定');
   await button('status');assert.equal(modal.title,'更新任務狀態');
@@ -432,7 +432,8 @@ for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team
   parentAllowed=false;await submit();assert.match(reply.content,/授權成員/);
   parentAllowed=true;threadAllowed=false;await submit();assert.match(reply.content,/授權成員/);
   threadAllowed=true;await handler({...base,channel:{...parent,id:forum},customId:modal.custom_id,isModalSubmit:()=>true});assert.match(reply.content,/指定 Mentor/);
-  for(const value of ['bad','https://discord.com/channels/'+other+'/'+threadId]) {await open(value);assert.match(reply.content,/指定 Mentor/);}
+  await open('bad');assert.match(reply.content,/連結或 ID/);
+  await open('https://discord.com/channels/'+other+'/'+threadId);assert.match(reply.content,/指定 Mentor/);
   channel.parentId=other;await open(threadId);assert.match(reply.content,/指定 Mentor/);
   assert.equal(f.writes.length,1);
  } finally {globalThis.fetch=priorFetch;for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
@@ -442,4 +443,21 @@ test('team task mutations require permission to send in the task thread even in 
   await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:{...f.actor,teamTask:true,canSend:false},kind:'dates',input:{due:'2026-10-10'}}),/task_forbidden/);
   assert.equal(f.writes.length,0);
  } finally {f.db.close();}
+});
+
+test('legacy team task roles remain required until channel access is explicitly enabled',async()=>{
+ const f=fixture();try {
+  f.policy.mode='roles';f.policy.roleIds=[other];
+  const actor={...f.actor,teamTask:true,canSend:true};
+  const op={id:operation,thread:f.thread,actor,kind:'dates',input:{due:'2026-10-10'}};
+  await assert.rejects(f.service.execute(op),/task_forbidden/);assert.equal(f.writes.length,0);
+  f.policy.teamChannelAccess=true;await f.service.execute(op);assert.equal(f.writes.length,1);
+  f.policy.teamChannelAccess=false;assert.equal(f.service.canManage({...actor,roles:[other]}),true);
+ } finally {f.db.close();}
+});
+test('channel access defaults off, requires task controls, and validates its explicit switch',()=>{
+ assert.equal(taskConfig({TASK_CONTROLS_ENABLED:'true'}).teamChannelAccess,false);
+ assert.equal(taskConfig({TEAM_CHANNEL_ACCESS_ENABLED:'true'}).teamChannelAccess,false);
+ assert.equal(taskConfig({TASK_CONTROLS_ENABLED:'true',TEAM_CHANNEL_ACCESS_ENABLED:'true'}).teamChannelAccess,true);
+ assert.throws(()=>taskConfig({TEAM_CHANNEL_ACCESS_ENABLED:'yes'}),/invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
 });
