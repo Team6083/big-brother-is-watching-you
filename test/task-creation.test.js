@@ -171,7 +171,7 @@ test('Discord flow selects dates, previews, creates once, and pings only selecte
   }
   assert.ok(f.result.reply.content.includes('2026-11-20'));assert.ok(f.result.reply.content.includes('2026-11-28'));assert.equal(f.counts().posts,0);
   await f.run(f.button('save'));assert.equal(f.counts().posts,1);assert.ok(f.result.reply.content.includes('<#'+thread+'>'));
-  assert.deepEqual(f.result.notice.allowedMentions.users,[owner,assignee]);assert.ok(!JSON.stringify(f.result.reply).includes('trello.com'));
+  assert.deepEqual(f.result.notice.allowedMentions.users,[owner,assignee]);assert.doesNotMatch(JSON.stringify(f.result.reply),/https?:\/\/\S+/);
   await f.run(f.button('check'));assert.equal(f.counts().posts,1);
 });
 

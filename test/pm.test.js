@@ -37,7 +37,7 @@ test('new proposals need recorded creation action, not arbitrary current cards',
   const s=sample();assert.equal(analyze(s,{now}).newProposals.length,0);s.actions=[{type:'createCard',date:new Date(now).toISOString(),data:{card:{id:'task'}}}];assert.equal(analyze(s,{now}).newProposals.length,1);
 });
 test('report preserves unknowns, removes title mentions and bounds Discord chunks',()=>{
-  const s=sample();s.cards[0].name='@everyone <@123>\n任務';const r=analyze(s,{now});assert.equal(r.tasks[0].priority,null);const text=renderReport(r,'weekly');assert.ok(!text.includes('https://trello.com'));assert.ok(text.includes('建議下次 Mentor'));assert.ok(!text.includes('@everyone'));assert.ok(messageChunks((text+'\n').repeat(10)).every(c=>c.length<=1800));
+  const s=sample();s.cards[0].name='@everyone <@123>\n任務';const r=analyze(s,{now});assert.equal(r.tasks[0].priority,null);const text=renderReport(r,'weekly');assert.doesNotMatch(text,/https?:\/\/\S+/);assert.ok(text.includes('建議下次 Mentor'));assert.ok(!text.includes('@everyone'));assert.ok(messageChunks((text+'\n').repeat(10)).every(c=>c.length<=1800));
 });
 test('Trello reader uses only GET, header credentials, retries and paginated actions',async()=>{
   let retries=0,pages=0;const s=sample();
@@ -51,7 +51,7 @@ test('Trello permission failure stops read without exposing response body',async
 function config(path){return {guildId:guild,forumId:forum,token:'localTestToken',databasePath:path};}
 test('thread reminder sends only to matching forum, suppresses mentions and persists dedupe across restart',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'cmsftc-pm-'));let sends=0;const report=analyze(sample(),{now});
-  const fetchImpl=async(url,options)=>{if(options.method==='POST'){sends++;const body=JSON.parse(options.body);assert.ok(!body.content.includes('https://trello.com'));assert.deepEqual(body.allowed_mentions,{parse:[]});return Response.json({id:'900000000000000014'});}return Response.json({guild_id:guild,parent_id:forum,type:11,thread_metadata:{archived:false,locked:false}});};
+  const fetchImpl=async(url,options)=>{if(options.method==='POST'){sends++;const body=JSON.parse(options.body);assert.doesNotMatch(body.content,/https?:\/\/\S+/);assert.deepEqual(body.allowed_mentions,{parse:[]});return Response.json({id:'900000000000000014'});}return Response.json({guild_id:guild,parent_id:forum,type:11,thread_metadata:{archived:false,locked:false}});};
   try{assert.equal((await notifyThreads(report,config(join(dir,'pm.sqlite')),{fetchImpl,now}))[0].status,'sent');assert.equal((await notifyThreads(report,config(join(dir,'pm.sqlite')),{fetchImpl,now}))[0].status,'sent');assert.equal(sends,1);}finally{rmSync(dir,{recursive:true,force:true});}
 });
 test('wrong forum and archived threads never receive reminders',async()=>{
@@ -108,7 +108,7 @@ test('deadline stages honor exact 24 hour, one hour and due boundaries',()=>{
 
 test('deadline sends only three notifications across days and restarts; owner and title edits do not resend',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'cmsftc-deadline-'));const path=join(dir,'pm.sqlite');let sends=0;const s=sample();s.cards[0].due=new Date(now+86400000).toISOString();
- const fetchImpl=async(url,options)=>{if(options.method==='POST'){sends++;const p=JSON.parse(options.body);assert.ok(!p.content.includes('https://trello.com'));return Response.json({id:'900000000000000014'});}return Response.json({guild_id:guild,parent_id:forum,type:11});};
+ const fetchImpl=async(url,options)=>{if(options.method==='POST'){sends++;const p=JSON.parse(options.body);assert.doesNotMatch(p.content,/https?:\/\/\S+/);return Response.json({id:'900000000000000014'});}return Response.json({guild_id:guild,parent_id:forum,type:11});};
  const check=async(time)=>notifyThreads(analyze(s,{now:time}),config(path),{now:time,fetchImpl});
  try{
   await check(now-1);assert.equal(sends,0);

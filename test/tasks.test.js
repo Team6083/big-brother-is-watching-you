@@ -265,7 +265,7 @@ for(const assignees of [[person],[person,other]])test('command submits '+assigne
   const channel={...f.thread,permissionsFor:()=>({has:()=>true}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user===person?'指派者':'執行者'})}}};
   const base={channel,user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},isAutocomplete:()=>false,isUserSelectMenu:()=>false};
   await handler({...base,id:operation,commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
-  assert.ok(!panel.content.includes('https://trello.com'));assert.ok(panel.content.includes('負責人：尚未設定'));
+  assert.doesNotMatch(panel.content,/https?:\/\/\S+/);assert.ok(panel.content.includes('負責人：尚未設定'));
   const custom=panel.components[0].toJSON().components.find(c=>c.custom_id.startsWith('task:edit:')).custom_id;
   await handler({...base,customId:custom,isChatInputCommand:()=>false,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
   assert.equal(modal.components.length,5);assert.equal(puts,0);
@@ -276,7 +276,7 @@ for(const assignees of [[person],[person,other]])test('command submits '+assigne
   let viewed,privateFlag;
   await handler({...base,customId:'task:view',isChatInputCommand:()=>false,isButton:()=>true,
    deferReply:async p=>{privateFlag=p.flags;},editReply:async p=>{viewed=p;}});
-  assert.ok(!JSON.stringify(viewed).includes('https://trello.com'));
+  assert.doesNotMatch(JSON.stringify(viewed),/https?:\/\/\S+/);
   assert.equal(puts,1);assert.equal(privateFlag,64);assert.equal(viewed.embeds[0].description,'工作內容與完成標準');assert.deepEqual(viewed.allowedMentions,{parse:[]});
   f.card.desc=withDiscordOwners(f.card.desc,[{id:other,name:'執行者'},{id:person,name:'協作 Mentor'}]);
   await handler({...base,id:'900000000000000018',commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
