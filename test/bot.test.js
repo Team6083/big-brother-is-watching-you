@@ -293,6 +293,7 @@ test('configuration rejects missing secrets, malformed IDs and non-Make/unsafe U
   const env = { DISCORD_BOT_TOKEN: 'synthetic-not-a-token', DISCORD_GUILD_ID: config.guildId,
     DISCORD_FORUM_CHANNEL_ID: config.forumId, MAKE_WEBHOOK_URL: 'https://hook.eu1.make.com/example' };
   assert.equal(loadConfig(env).guildId, config.guildId);
+  assert.throws(() => loadConfig({...env,TEAM_CHANNEL_ACCESS_ENABLED:'yes'}), /invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
   for (const url of ['http://hook.make.com/secret', 'https://evil.test/secret', 'https://user:secret@hook.make.com/x']) {
     assert.throws(() => loadConfig({ ...env, MAKE_WEBHOOK_URL: url }), { message: 'invalid_MAKE_WEBHOOK_URL' });
   }

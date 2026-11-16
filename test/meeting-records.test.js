@@ -31,7 +31,7 @@ test('record is included in the scheduled reminder and retained after cancellati
   store.set(meetingChannelId,'2026-10-18','19:00','actor','教室',Date.parse('2026-10-16T10:00:00+08:00'),'20:00');
   store.setRecord(meetingChannelId,'2026-10-18',link,'actor');let sent;
   const reminder=new MeetingReminder({store,verify:async()=>{},send:async p=>{sent=p;return {id:'m'};},log:()=>{},now:()=>Date.parse('2026-10-17T17:00:00+08:00')});
-  await reminder.tick();assert.ok(sent.content.includes(link));
+  await reminder.tick();assert.equal(sent.content.split('\n').at(-1),'會議記錄：<'+link+'>');
   store.cancel(meetingChannelId);assert.equal(store.record(meetingChannelId,'2026-10-18').url,link);db.close();
 });
 test('Discord records use only existing dates, keep results private and reject forged choices',async()=>{
@@ -55,11 +55,11 @@ test('Discord records use only existing dates, keep results private and reject f
   await run({command:'會議設定',id:'set'});
   await run({action:'meeting:record_history:set'});
   assert.ok((await run({action:'meeting:record_date:set',values:['2026-10-01']})).modal);
-  assert.ok((await run({action:'meeting:record_submit:set',fields:{getTextInputValue:()=>link}})).result.content.includes(link));
+  assert.equal((await run({action:'meeting:record_submit:set',fields:{getTextInputValue:()=>link}})).result.content,'✅ 已儲存 2026-10-01 會議記錄：\n<'+link+'>');
   await run({command:'查看會議記錄'});
   const found=(await run({action:'meeting:record_date:draft',values:['2026-10-01']})).result;
-  assert.ok(found.content.includes(link));assert.deepEqual(found.allowedMentions,{parse:[]});
-  const denied=(await run({command:'查看會議記錄',channel:'other'})).result;assert.match(denied.content,/隊長頻道/);assert.ok(!denied.content.includes(link));db.close();
+  assert.equal(found.content,'2026-10-01 會議記錄：\n<'+link+'>');assert.deepEqual(found.allowedMentions,{parse:[]});
+  const denied=(await run({command:'查看會議記錄',channel:'other'})).result;assert.match(denied.content,/隊長／幹部頻道/);assert.equal(denied.content,'請在隊長／幹部頻道內操作；限可查看並發言的成員。');db.close();
 });
 
 test('scheduled dates remain in history after next meeting; rescheduled future dates disappear',()=>{

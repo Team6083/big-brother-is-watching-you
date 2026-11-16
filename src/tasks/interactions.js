@@ -8,20 +8,21 @@ import {MongoTaskStore} from '../state/tasks.js';
 import { TaskStore } from './store.js';
 import { taskConfig, trelloTasks } from './trello.js';
 import { TaskService } from './service.js';
-import { isTaskThread, isTeamTaskChannel } from './scope.js';
+import { isTaskThread, isTeamTaskChannel, teamChannelIds, taskThreadId } from './scope.js';
 import {createTaskCommand} from './create-ui.js';
 
 export const taskCommands = [
-  new SlashCommandBuilder().setName('任務').setDescription('開啟此提案的任務操作表單'),
+  new SlashCommandBuilder().setName('任務').setDescription('查看或管理任務；文字頻道內可指定任務討論串')
+    .addStringOption(o=>o.setName('討論串').setDescription('在隊長／幹部頻道操作時，填任務討論串連結或 ID')),
   createTaskCommand,
 ];
 
-export function controls(draftId) {
+export function controls(draftId,threadId) {
   return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(draftId?'task:status:'+draftId:'task:status').setLabel('更新狀態').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(draftId?'task:edit:'+draftId:'task:edit').setLabel('任務設定').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('task:view').setLabel('查看任務').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('task:reconcile').setLabel('核對未確認更新').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(threadId?'task:view_thread:'+threadId:'task:view').setLabel('查看任務').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(threadId?'task:reconcile_thread:'+threadId:'task:reconcile').setLabel('核對未確認更新').setStyle(ButtonStyle.Secondary),
   )];
 }
 
@@ -118,6 +119,8 @@ const errors = {
   task_invalid_status:'狀態清單已變更或不可使用，請重新輸入 /任務。',
   task_invalid_assigner:'請選擇 1–5 位可查看論壇的人類成員作為被指派的人。',
   task_invalid_owners:'請選擇 1–5 位可查看論壇的人類負責人。',
+  task_invalid_thread:'請填入 Discord 任務討論串連結或 ID；支援 discord.com、ptb.discord.com 及 canary.discord.com，不支援討論串名稱。',
+  task_thread_option_mismatch:'請省略「討論串」選項，或填入目前討論串的連結或 ID；若要操作其他任務，請回到其父頻道使用 /任務。',
   task_form_expired:'表單已過期或 Bot 已重新啟動，請重新輸入 /任務。',
   task_invalid_description:'描述最多 4000 字，請勿使用系統保留的 CMSFTC 標記。',
   task_invalid_description_block:'任務描述格式異常，請管理員核對 Trello 卡片。',
@@ -146,19 +149,37 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
   const service=new TaskService({store,proposalStore,trello,config,policy});
   let active=0;
   const drafts=new Map();
-  const draftFor=(id,i)=>{const d=drafts.get(id);if(!d || d.actor!==i.user.id || d.thread!==i.channel.id || d.expires<Date.now())throw new Error('task_form_expired');return d;};
+  const draftFor=(id,i)=>{const d=drafts.get(id);if(!d || d.actor!==i.user.id || d.channel!==i.channel.id || d.expires<Date.now())throw new Error('task_form_expired');return d;};
   client.on(Events.InteractionCreate, async i=>{
     const command=i.isChatInputCommand();
     if(command ? i.commandName!=='任務' : !i.customId?.startsWith('task:'))return;
     active++;
     try {
-      const channel=i.channel;
-      if(command && !i.user.bot && isTeamTaskChannel(channel,config))return await i.reply({flags:MessageFlags.Ephemeral,
-        content:'新增工作請在此頻道使用 /建立任務。建立後，到 Bot 開的任務討論串使用 /任務 查看或修改狀態。',allowedMentions:{parse:[]}});
+      let channel=i.channel;
+      const value=command?i.options?.getString('討論串')?.trim():undefined;
+      const action=i.customId?.split(':')[1];
+      if(!isTeamTaskChannel(channel,config) && ['view_thread','reconcile_thread'].includes(action))throw new Error('task_outside_forum');
+      if(isTeamTaskChannel(channel,config) && !i.user.bot) {
+        if(!channel.permissionsFor(i.member)?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.SendMessages]))throw new Error('task_forbidden');
+        let threadId;
+        if(command) {
+          if(!value)return await i.reply({flags:MessageFlags.Ephemeral,content:'新增工作請使用 /建立任務。查看或修改既有任務，請在 /任務 的「討論串」填入此頻道下的任務討論串連結或 ID；也可直接到任務討論串使用 /任務。',allowedMentions:{parse:[]}});
+          threadId=taskThreadId(value,config.guildId);
+        } else {
+          const parts=i.customId.split(':');
+          threadId=['view_thread','reconcile_thread'].includes(action)?parts[2]:draftFor(i.isModalSubmit()?parts[3]:parts[2],i).thread;
+        }
+        if(!/^\d{17,20}$/.test(threadId))throw new Error('task_outside_forum');
+        const binding=await proposalStore.get(threadId);
+        if(binding?.status!=='succeeded' || binding.guild_id!==config.guildId || binding.forum_id!==i.channel.id)throw new Error('task_outside_forum');
+        try {channel=await client.channels.fetch(threadId);}catch{throw new Error('task_outside_forum');}
+        if(channel?.parentId!==i.channel.id)throw new Error('task_outside_forum');
+      } else if(command && value && taskThreadId(value,config.guildId)!==channel?.id)throw new Error('task_thread_option_mismatch');
       if(!isTaskThread(channel,config) || i.user.bot)throw new Error('task_outside_forum');
       const member=i.member;
       const permissions=channel.permissionsFor(member);
       const actor={id:i.user.id,bot:i.user.bot,roles:member.roles.cache.map(r=>r.id),
+        teamTask:teamChannelIds.includes(channel.parentId),canSend:!!permissions?.has(PermissionFlagsBits.SendMessagesInThreads),
         canViewForum:!!permissions?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory])};
       if(!actor.canViewForum)throw new Error('task_forbidden');
       if(i.isButton() && (i.customId.startsWith('task:edit:') || i.customId.startsWith('task:description:') || i.customId.startsWith('task:status:'))) {
@@ -181,17 +202,17 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
         const [card,lists]=await Promise.all([service.context(channel,actor),trello.lists()]);
         for(const [id,d] of drafts)if(d.expires<Date.now())drafts.delete(id);
         if(drafts.size>=100)drafts.delete(drafts.keys().next().value);
-        drafts.set(i.id,{actor:actor.id,thread:channel.id,card,lists,expires:Date.now()+15*60*1000});
+        drafts.set(i.id,{actor:actor.id,channel:i.channel.id,thread:channel.id,card,lists,expires:Date.now()+15*60*1000});
         const displayDate=value=>value?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',dateStyle:'short'}).format(new Date(value)):'尚未設定';
-        return await i.editReply({content:`【任務操作】${safe(card.name)}\n開始：${displayDate(card.start)}｜截止：${displayDate(card.due)}\n負責人：${(discordOwners(card.desc)||[]).map(o=>safe(o.name)||'<@'+o.id+'>').join('、') || '尚未設定'}\n討論後設定人員與日期；後續只需更新狀態。`,components:controls(i.id),allowedMentions:{parse:[]}});
+        return await i.editReply({content:`【任務操作】${safe(card.name)}\n開始：${displayDate(card.start)}｜截止：${displayDate(card.due)}\n負責人：${(discordOwners(card.desc)||[]).map(o=>safe(o.name)||'<@'+o.id+'>').join('、') || '尚未設定'}\n討論後設定人員與日期；後續只需更新狀態。`,components:controls(i.id,channel.id!==i.channel.id?channel.id:undefined),allowedMentions:{parse:[]}});
       }
-      if(i.isButton() && i.customId==='task:view') {
+      if(i.isButton() && ['view','view_thread'].includes(action)) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
         const [card,lists]=await Promise.all([service.context(channel,actor),trello.lists()]);
         return await i.editReply({embeds:[taskView(card,lists)],allowedMentions:{parse:[]}});
       }
       const kind=i.customId?.split(':')[2];
-      if(i.isButton() && i.customId==='task:reconcile') {
+      if(i.isButton() && ['reconcile','reconcile_thread'].includes(action)) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
         await service.reconcile(channel,actor);
         return await i.editReply({content:'✅ 已從 Trello 核對先前更新。',allowedMentions:{parse:[]}});

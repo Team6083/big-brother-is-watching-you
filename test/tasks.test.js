@@ -265,7 +265,7 @@ for(const assignees of [[person],[person,other]])test('command submits '+assigne
   const channel={...f.thread,permissionsFor:()=>({has:()=>true}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user===person?'指派者':'執行者'})}}};
   const base={channel,user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},isAutocomplete:()=>false,isUserSelectMenu:()=>false};
   await handler({...base,id:operation,commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
-  assert.ok(!panel.content.includes('https://trello.com'));assert.ok(panel.content.includes('負責人：尚未設定'));
+  assert.doesNotMatch(panel.content,/https?:\/\/\S+/);assert.ok(panel.content.includes('負責人：尚未設定'));
   const custom=panel.components[0].toJSON().components.find(c=>c.custom_id.startsWith('task:edit:')).custom_id;
   await handler({...base,customId:custom,isChatInputCommand:()=>false,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
   assert.equal(modal.components.length,5);assert.equal(puts,0);
@@ -276,7 +276,7 @@ for(const assignees of [[person],[person,other]])test('command submits '+assigne
   let viewed,privateFlag;
   await handler({...base,customId:'task:view',isChatInputCommand:()=>false,isButton:()=>true,
    deferReply:async p=>{privateFlag=p.flags;},editReply:async p=>{viewed=p;}});
-  assert.ok(!JSON.stringify(viewed).includes('https://trello.com'));
+  assert.doesNotMatch(JSON.stringify(viewed),/https?:\/\/\S+/);
   assert.equal(puts,1);assert.equal(privateFlag,64);assert.equal(viewed.embeds[0].description,'工作內容與完成標準');assert.deepEqual(viewed.allowedMentions,{parse:[]});
   f.card.desc=withDiscordOwners(f.card.desc,[{id:other,name:'執行者'},{id:person,name:'協作 Mentor'}]);
   await handler({...base,id:'900000000000000018',commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
@@ -377,7 +377,7 @@ test('task command in allowed captain or cadre text channels explains how to cre
  try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{});
  for(const id of process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')) {
   await handler({commandName:'任務',isChatInputCommand:()=>true,isAutocomplete:()=>false,
-   channel:{id,guildId:guild,type:0},user:{id:person,bot:false},reply:async p=>{reply=p;}});
+   channel:{id,guildId:guild,type:0,permissionsFor:()=>({has:()=>true})},user:{id:person,bot:false},reply:async p=>{reply=p;}});
   assert.match(reply.content,/\/建立任務/);assert.match(reply.content,/討論串/);assert.equal(reply.flags,64);assert.equal(f.writes.length,0);
  }
  }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
@@ -399,4 +399,65 @@ test('combined date field accepts prefilled or empty values and rejects malforme
 
 test('invalid description in task settings prevents all personnel, date and status changes',async()=>{
  const f=fixture();try{const op=fullEdit(f);op.input.description='x'.repeat(4001);await assert.rejects(f.service.execute(op),/task_invalid_description/);assert.equal(f.writes.length,0);assert.equal(f.store.pending(cardId),undefined);}finally{f.db.close();}
+});
+
+for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team channel '+parentId+' manages its bound task without manager roles',async()=>{
+ const saved={...process.env},priorFetch=globalThis.fetch,f=fixture();fullEdit(f);
+ let handler,panel,modal,reply,parentAllowed=true,threadAllowed=true;
+ Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'roles',TASK_MANAGER_ROLE_IDS:other,TEAM_CHANNEL_ACCESS_ENABLED:'true',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
+ const parent={id:parentId,guildId:guild,type:0,permissionsFor:()=>({has:()=>parentAllowed})};
+ const channel={...f.thread,parentId,permissionsFor:()=>({has:()=>threadAllowed}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user})}}};
+ globalThis.fetch=async(url,options)=>{
+  if(options.method==='PUT'){f.writes.push(JSON.parse(options.body));Object.assign(f.card,JSON.parse(options.body));return Response.json(f.card);}
+  if(new URL(url).pathname.endsWith('/lists'))return Response.json(await f.trello.lists());
+  if(new URL(url).pathname.includes('/cards/'))return Response.json(f.card);
+  return Response.json({id:boardId,closed:false});
+ };
+ try {
+  registerTaskInteractions({on:(event,h)=>{handler=h;},channels:{fetch:async()=>channel}},
+   {db:f.db,get:()=>({...f.proposalStore.get(),guild_id:guild,forum_id:parentId})},{guildId:guild,forumId:forum},()=>{});
+  const base={channel:parent,user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},isAutocomplete:()=>false,isUserSelectMenu:()=>false,isModalSubmit:()=>false,isButton:()=>false,isChatInputCommand:()=>false,
+   reply:async p=>{reply=p;},deferReply:async()=>{},editReply:async p=>{reply=p;}};
+  const open=async value=>handler({...base,id:operation,commandName:'任務',isChatInputCommand:()=>true,options:{getString:()=>value},editReply:async p=>{panel=p;}});
+  await open('https://discord.com/channels/'+guild+'/'+threadId);
+  assert.match(panel.content,/任務操作/);
+  const buttons=panel.components[0].toJSON().components;
+  const button=async action=>handler({...base,customId:buttons.find(c=>c.custom_id.startsWith('task:'+action+':')||c.custom_id.startsWith('task:'+action+'_thread:')).custom_id,isButton:()=>true,showModal:async m=>{modal=m.toJSON();}});
+  await button('view');assert.equal(reply.embeds[0].title,f.card.name||'');
+  await button('edit');assert.equal(modal.title,'任務設定');
+  await button('status');assert.equal(modal.title,'更新任務狀態');
+  const submit=()=>handler({...base,id:'900000000000000019',customId:modal.custom_id,isModalSubmit:()=>true,fields:{getStringSelectValues:()=>[f.card.idList]}});
+  await submit();assert.match(reply.content,/已更新至 Trello/);assert.equal(f.writes.length,1);
+  await button('reconcile');assert.match(reply.content,/沒有待核對/);
+  parentAllowed=false;await submit();assert.match(reply.content,/授權成員/);
+  parentAllowed=true;threadAllowed=false;await submit();assert.match(reply.content,/授權成員/);
+  threadAllowed=true;await handler({...base,channel:{...parent,id:forum},customId:modal.custom_id,isModalSubmit:()=>true});assert.match(reply.content,/指定 Mentor/);
+  await open('bad');assert.match(reply.content,/連結或 ID/);
+  await open('https://discord.com/channels/'+other+'/'+threadId);assert.match(reply.content,/指定 Mentor/);
+  channel.parentId=other;await open(threadId);assert.match(reply.content,/指定 Mentor/);
+  assert.equal(f.writes.length,1);
+ } finally {globalThis.fetch=priorFetch;for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
+});
+test('team task mutations require permission to send in the task thread even in forum mode',async()=>{
+ const f=fixture();try {
+  await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:{...f.actor,teamTask:true,canSend:false},kind:'dates',input:{due:'2026-10-10'}}),/task_forbidden/);
+  assert.equal(f.writes.length,0);
+ } finally {f.db.close();}
+});
+
+test('legacy team task roles remain required until channel access is explicitly enabled',async()=>{
+ const f=fixture();try {
+  f.policy.mode='roles';f.policy.roleIds=[other];
+  const actor={...f.actor,teamTask:true,canSend:true};
+  const op={id:operation,thread:f.thread,actor,kind:'dates',input:{due:'2026-10-10'}};
+  await assert.rejects(f.service.execute(op),/task_forbidden/);assert.equal(f.writes.length,0);
+  f.policy.teamChannelAccess=true;await f.service.execute(op);assert.equal(f.writes.length,1);
+  f.policy.teamChannelAccess=false;assert.equal(f.service.canManage({...actor,roles:[other]}),true);
+ } finally {f.db.close();}
+});
+test('channel access defaults off, requires task controls, and validates its explicit switch',()=>{
+ assert.equal(taskConfig({TASK_CONTROLS_ENABLED:'true'}).teamChannelAccess,false);
+ assert.equal(taskConfig({TEAM_CHANNEL_ACCESS_ENABLED:'true'}).teamChannelAccess,false);
+ assert.equal(taskConfig({TASK_CONTROLS_ENABLED:'true',TEAM_CHANNEL_ACCESS_ENABLED:'true'}).teamChannelAccess,true);
+ assert.throws(()=>taskConfig({TEAM_CHANNEL_ACCESS_ENABLED:'yes'}),/invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
 });
