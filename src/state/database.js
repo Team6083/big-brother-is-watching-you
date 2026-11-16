@@ -1,7 +1,7 @@
 import {MongoClient} from 'mongodb';
 import {DatabaseFailure} from './diagnostics.js';
 
-export const collections=['proposals','forum_recovery','task_members','task_changes','task_creations','meetings','meeting_records','meeting_dates','pm_deliveries','bank_notifications'];
+export const collections=['tasks','proposals','forum_recovery','task_members','task_changes','task_creations','meetings','meeting_records','meeting_dates','pm_deliveries','bank_notifications'];
 const transactionOptions={readConcern:{level:'snapshot'},writeConcern:{w:'majority'},readPreference:'primary',maxCommitTimeMS:5000,timeoutMS:15000};
 
 export class MongoDatabase {
@@ -18,7 +18,7 @@ export class MongoDatabase {
   async check() {
     const hello=await this.database.command({hello:1});
     if(!hello.setName && hello.msg!=='isdbgrid')throw new DatabaseFailure('mongodb_check_failed',{stage:'check',reason:'replica_set_required'});
-    for(const [name,index] of [['proposals','_id_'],['task_creations','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_'],['bank_notifications','_id_']]) {
+    for(const [name,index] of [['tasks','task_thread_unique'],['proposals','_id_'],['task_creations','_id_'],['task_changes','task_one_pending'],['task_members','member_trello_unique'],['meetings','_id_'],['pm_deliveries','_id_'],['bank_notifications','_id_']]) {
       const indexes=await this.collection(name).listIndexes().toArray(),found=indexes.find(i=>i.name===index);
       if(!found || (index!=='_id_'&&!found.unique) || index==='task_one_pending'&&found.partialFilterExpression?.state!=='pending')throw new DatabaseFailure('mongodb_check_failed',{stage:'check',reason:'indexes_missing'});
     }
@@ -59,6 +59,7 @@ export async function migrate(db) {
       }
     }
     for(const [name,fields,options] of [
+      ['tasks',{guild_id:1,thread_id:1},{name:'task_thread_unique',unique:true}],
       ['proposals',{guild_id:1,forum_id:1,next_attempt_at:1,received_at:1},{name:'proposals_due'}],
       ['task_members',{guild_id:1,trello_id:1},{name:'member_trello_unique',unique:true}],
       ['task_changes',{card_id:1},{name:'task_one_pending',unique:true,partialFilterExpression:{state:'pending'}}],

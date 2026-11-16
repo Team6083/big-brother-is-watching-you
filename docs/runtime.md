@@ -6,8 +6,8 @@
 |---|---|
 | Codebase | 同一 repo、同一入口 `npm start`，不同環境使用不同設定 |
 | Dependencies | 精確版本與 lockfile，npm ci，不用全域套件 |
-| Config | Token、Webhook、頻道／角色／看板、`MONGODB_URI` 由 env 提供 |
-| Backing services | MongoDB、Discord、Make、Trello 都是外部資源 |
+| Config | Token、頻道／角色、`MONGODB_URI` 由 env 提供 |
+| Backing services | MongoDB 與 Discord 是外部資源 |
 | Build/release/run | 安裝、注入設定、一次性建索引、執行分開；不自動開通服務 |
 | Processes | 無本機持久狀態；只有尚未提交、15 分鐘失效的 Discord 表單暫存記憶體 |
 | Port binding | 指定 PORT 時提供健康檢查，Gateway 使用出站連線 |
@@ -21,14 +21,15 @@
 
 使用官方 `mongodb` driver，不使用 Mongoose，也沒有 SQL 翻譯介面。`src/state/` 提供具名資料操作；runtime 不呼叫 `prepare(sql)`。
 
-十個 collection：`proposals`、`forum_recovery`、`task_members`、`task_changes`、`task_creations`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`、`bank_notifications`。升級後先執行 `npm run migrate`，建立缺少的 collection；runtime 的 `check` 會確認必要 collection 及索引存在。
+十一個 collection：`tasks`、`proposals`、`forum_recovery`、`task_members`、`task_changes`、`task_creations`、`meetings`、`meeting_records`、`meeting_dates`、`pm_deliveries`、`bank_notifications`。升級後先執行 `npm run migrate`，建立缺少的 collection；runtime 的 `check` 會確認必要 collection 及索引存在。
 
-- Discord ID 及卡片 ID 都是字串；毫秒 timestamp 是 JS 安全整數。
+- Discord ID 及任務 ID 都是字串；毫秒 timestamp 是 JS 安全整數。
 - `_id` 保存 Thread ID、Interaction ID、delivery key 或由 channel／date 等欄位組成的識別碼。
 - proposals 以 `findOneAndUpdate` 原子取得租約；寫入必須持有相同 lease token。
-- 任務 pending 使用 partial unique index；同一張卡同時只能有一項待確認更新。
-- 文字頻道建立任務以草稿操作 ID 作為 `task_creations._id`，在建立 Discord 討論串前就原子保留。`thread_pending`／`card_pending` 保存結果不明的操作；只有確認完整卡片欄位後才在 transaction 中一起保存提案綁定及 `succeeded`。重啟後可核對，不自動重送建立請求。通知另以 pending→sending→sent 記錄，sending 不重送。
-- 會議設定／取消與日期歷史使用 transaction。callback 只含資料庫操作，可安全由 driver 重試，沒有 Discord／Trello 副作用。
+- `tasks` 以伺服器／討論串設唯一索引，儲存目前內容、狀態、日期、版本及原始提案；更新以版本比對避免覆寫並行修改。
+- 任務 pending 使用 partial unique index；同一項任務同時只能有一項待確認更新。
+- 文字頻道建立任務以草稿操作 ID 作為 `task_creations._id`，在建立 Discord 討論串前就原子保留。`thread_pending`／`card_pending` 保存結果不明的操作；只有確認完整任務欄位後才在 transaction 中一起保存提案綁定及 `succeeded`。重啟後可核對，不自動重送 Discord 建立討論串請求。MongoDB 任務依伺服器／討論串唯一索引進行冪等寫入。通知另以 pending→sending→sent 記錄，sending 不重送。
+- 會議設定／取消與日期歷史使用 transaction。callback 只含資料庫操作，可安全由 driver 重試，沒有 Discord 副作用。
 - 不設 TTL 刪除去重、會議或提醒歷史。
 - Bank 新任務通知的首次清單基準與各任務 ID 在 transaction 中保存。發送前原子取得工作，回應不明時僅核對最近公告，不自動重送。與 Gateway 共用主程序及 MongoDB，停止時一起排空。
 - 狀態由 store 方法檢查並限定寫入值，不要求 collection validator。直接手動改 DB 不受此層驗證保護。
@@ -45,7 +46,7 @@
 
 ## 單一程序與部署要求
 
-啟動 `npm start`，並以 `PM_ENABLED=true` 啟用同程序內的 PM。`PM_INTERVAL_MS` 預設 60000；掃描未完成時不重疊執行。停止時不再啟動下一輪，主關閉流程也會等待 PM。PM 共用資料庫連線，直接呼叫 Trello／Discord，不經 Make。
+啟動 `npm start`，並以 `PM_ENABLED=true` 啟用同程序內的 PM。`PM_INTERVAL_MS` 預設 60000；掃描未完成時不重疊執行。停止時不再啟動下一輪，主關閉流程也會等待 PM。PM 共用資料庫連線，從 MongoDB 讀取任務，經 Discord 發送提醒，不呼叫 Trello 或 Make。
 
 應用程式不再取得全域程序鎖。部署維護者須採單副本與 Recreate，並避免舊環境使用相同正式 Token 並存；不能以滾動部署或增加 replicas 擴展同一 Bot。本次不修改部署檔案。
 
@@ -71,7 +72,7 @@ CI 維護者可另加 mongod binary 快取；既有 Dockerfile、workflow 本次
 1. 確認正式 MongoDB 主版本、replica set、TLS 及該 DB 的 readWrite role；執行 migrate／check。
 2. 決定是否需要舊狀態，保留備份並停止舊 Bot／PM，再由部署負責人切換；本分支不自動搬移或捨棄。
 3. 只有一個 npm start 程序，PM_ENABLED=true。確認部署是單副本 Recreate，而不是期待程式鎖擋重複啟動。
-4. 新文章建卡一次、Make 回應遺失不重複建卡；重啟補抓只涵蓋新啟用後文章。
+4. 新文章直接儲存一次、MongoDB 寫入回應遺失不重複建立任務；重啟補抓只涵蓋新啟用後文章。
 5. 任務設定、查看、狀態、Owner／Assignee 與日期正確，未授權頻道／成員被拒絕。
 6. 24h／1h／逾期與會議提醒僅發一次；記錄只能選已有會議日期。
 7. 發 SIGTERM，確認 Gateway 與 PM 一起停止、排空及重啟後狀態；不殘留第二個 PM worker。

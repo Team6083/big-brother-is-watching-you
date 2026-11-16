@@ -260,25 +260,20 @@ test('notification failure retries only the reply, never resends the proposal', 
   assert.equal(JSON.stringify(h.calls.logs).includes('sensitive'), false);
 });
 
-test('Discord adapter checks permissions, prevents mentions and recovers existing confirmation', async () => {
-  const { thread } = fixture(); let sent = 0;
-  const messages = new Collection();
-  thread.permissionsFor = () => new PermissionsBitField([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]);
-  thread.messages = { fetch: async () => messages };
-  thread.send = async options => { sent++; assert.equal(options.content, '✅ 此提案已收錄至 Trello。');
-    assert.deepEqual(options.allowedMentions, { parse: [] });
-    assert.equal(options.enforceNonce, true); return { id: 'sent' }; };
-  const adapter = createDiscordAdapter({ user: { id: 'bot' }, channels: { fetch: async () => thread } }, config);
-  assert.equal((await adapter.notify(id, ack)).skipped, true); assert.equal(sent, 0);
-  thread.permissionsFor = () => new PermissionsBitField([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory,
-    PermissionFlagsBits.SendMessagesInThreads]);
-  await adapter.notify(id, ack); assert.equal(sent, 1);
-  messages.set('existing', { id: 'existing', author: { id: 'bot' }, content: `✅ 此提案已收錄至 Trello。\n${ack.trello_card_url}` });
-  assert.equal((await adapter.notify(id, ack)).id, 'existing'); assert.equal(sent, 1);
-  messages.set('existing', { id: 'existing', author: { id: 'bot' }, content: '✅ 此提案已收錄至 Trello。' });
-  assert.equal((await adapter.notify(id, ack)).id, 'existing'); assert.equal(sent, 1);
-  messages.set('existing', { id: 'existing', author: { id: 'bot' }, content: '✅ 此提案已收錄至 Legacy Team Trello。' });
-  assert.equal((await adapter.notify(id, ack)).id, 'existing'); assert.equal(sent, 1);
+test('Discord adapter confirms native tasks once and skips unimported legacy records', async () => {
+  const {thread}=fixture(),messages=new Collection();let sent=0;
+  const nativeAck={task_id:'aaaaaaaaaaaaaaaaaaaaaaaa',task_url:'https://discord.com/channels/'+config.guildId+'/'+id};
+  const content='✅ 此提案已收錄為任務，可使用 /任務 查看與設定。';
+  thread.permissionsFor=()=>new PermissionsBitField([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory]);
+  thread.messages={fetch:async()=>messages};
+  thread.send=async options=>{sent++;assert.equal(options.content,content);assert.deepEqual(options.allowedMentions,{parse:[]});assert.equal(options.enforceNonce,true);return {id:'sent'};};
+  const adapter=createDiscordAdapter({user:{id:'bot'},channels:{fetch:async()=>thread}},config);
+  assert.equal((await adapter.notify(id,nativeAck)).skipped,true);
+  thread.permissionsFor=()=>new PermissionsBitField([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.SendMessagesInThreads]);
+  assert.equal((await adapter.notify(id,ack)).code,'legacy_task_not_imported');
+  await adapter.notify(id,nativeAck);assert.equal(sent,1);
+  messages.set('existing',{id:'existing',author:{id:'bot'},content});
+  assert.equal((await adapter.notify(id,nativeAck)).id,'existing');assert.equal(sent,1);
 });
 
 test('AI PM fields preserve unknowns; no owner, due date or priority is invented', () => {
@@ -289,16 +284,14 @@ test('AI PM fields preserve unknowns; no owner, due date or priority is invented
   }
 });
 
-test('configuration rejects missing secrets, malformed IDs and non-Make/unsafe URLs without echoing input', () => {
-  const env = { DISCORD_BOT_TOKEN: 'synthetic-not-a-token', DISCORD_GUILD_ID: config.guildId,
-    DISCORD_FORUM_CHANNEL_ID: config.forumId, MAKE_WEBHOOK_URL: 'https://hook.eu1.make.com/example' };
-  assert.equal(loadConfig(env).guildId, config.guildId);
-  assert.throws(() => loadConfig({...env,TEAM_CHANNEL_ACCESS_ENABLED:'yes'}), /invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
-  for (const url of ['http://hook.make.com/secret', 'https://evil.test/secret', 'https://user:secret@hook.make.com/x']) {
-    assert.throws(() => loadConfig({ ...env, MAKE_WEBHOOK_URL: url }), { message: 'invalid_MAKE_WEBHOOK_URL' });
-  }
-  assert.throws(() => loadConfig({ ...env, DISCORD_GUILD_ID: '123' }), /invalid_DISCORD_GUILD_ID/);
-  assert.equal(backoff(1, () => 0), 2_000); assert.equal(backoff(5, () => 0), 32_000);
+test('configuration needs Discord but no Make or Trello credentials',()=>{
+  const env={DISCORD_BOT_TOKEN:'synthetic-not-a-token',DISCORD_GUILD_ID:config.guildId,DISCORD_FORUM_CHANNEL_ID:config.forumId};
+  assert.equal(loadConfig(env).guildId,config.guildId);
+  assert.equal(loadConfig({...env,MAKE_WEBHOOK_URL:'unused'}).webhookUrl,undefined);
+  assert.throws(()=>loadConfig({...env,DISCORD_BOT_TOKEN:''}),/missing_DISCORD_BOT_TOKEN/);
+  assert.throws(()=>loadConfig({...env,TEAM_CHANNEL_ACCESS_ENABLED:'yes'}),/invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
+  assert.throws(()=>loadConfig({...env,DISCORD_GUILD_ID:'123'}),/invalid_DISCORD_GUILD_ID/);
+  assert.equal(backoff(1,()=>0),2000);assert.equal(backoff(5,()=>0),32000);
 });
 
 async function serverFixture(t, handler) {

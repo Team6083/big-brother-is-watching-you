@@ -13,15 +13,10 @@ function fixture() {
   const binding={status:'succeeded',guild_id:guild,forum_id:parentId,ack:JSON.stringify({trello_card_id:cardId})};
   const card={id:cardId,idBoard:boardId,name:'Bound task',idList:cardId,idMembers:[],desc:'CMSFTC_THREAD_ID='+threadId,closed:false};
   let handler,reply,modal,fetches=0,writes=0,failFetch=false,bound=true;
-  globalThis.fetch=async(url,options)=>{
-    if(options.method!=='GET')writes++;
-    if(new URL(url).pathname.includes('/cards/'))return Response.json(card);
-    if(new URL(url).pathname.endsWith('/lists'))return Response.json([{id:cardId,idBoard:boardId,name:'Open'}]);
-    return Response.json({id:boardId,closed:false});
-  };
+  globalThis.fetch=()=>assert.fail('task handler must not use HTTP');
   const register=()=>registerTaskInteractions({on:(_,h)=>{handler=h;},channels:{fetch:async(id,options)=>{
     fetches++;assert.notEqual(options?.force,true);if(failFetch)throw Object.assign(Error('unknown channel'),{code:10003});return thread;
-  }}},{db,get:id=>bound&&id===threadId?binding:undefined},{guildId:guild,forumId:'900000000000000012'},()=>{});
+  }}},{db,get:id=>bound&&id===threadId?binding:undefined},{guildId:guild,forumId:'900000000000000012'},()=>{},{tasks:{board:async()=>({id:boardId,closed:false}),card:async()=>card,lists:async()=>[{id:cardId,idBoard:boardId,name:'Open'}]}});
   register();
   const run=async patch=>{
     reply=undefined;modal=undefined;

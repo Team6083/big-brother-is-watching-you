@@ -1,3 +1,8 @@
+import {MongoTasks} from '../src/tasks/database.js';
+import {importTasks} from '../src/tasks/import.js';
+import {collectReport} from '../src/pm/monitor.js';
+import {analyze} from '../src/pm/report.js';
+import {discordOwners} from '../src/tasks/owners.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
@@ -27,7 +32,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
   db=await openDatabase({MONGODB_URI:rootUri});
   assert.equal(db.database.databaseName,'bot_test');
   assert.ok(db instanceof MongoDatabase);await migrate(db);await migrate(db);await db.check();
-  const queue=new MongoStore(db),tasks=new MongoTaskStore(db),meetings=new MongoMeetingStore(db);
+  const queue=new MongoStore(db),taskStore=new MongoTaskStore(db),meetings=new MongoMeetingStore(db);
   const guild='900000000000000100',forum='900000000000000101',thread='900000000000000102',actor='900000000000000103';
   const config={guildId:guild,forumId:forum,notify:true};let now=Date.parse('2026-10-16T10:00:00Z');
   await t.test('database readWrite role can initialize, check and transact without admin privileges',async()=>{
@@ -53,7 +58,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     const uri=replica.getUri('migration_read_only').replace('mongodb://','mongodb://migration_reader:synthetic_read_password@')+'&authSource=migration_read_only';
     const limited=await openDatabase({MONGODB_URI:uri});
     try {await assert.rejects(migrate(limited),error=>{
-      const output=migrationFailure(error);assert.equal(output.stage,'create_collection');assert.equal(output.collection,'proposals');assert.equal(output.mongo_code,13);assert.equal(output.reason,'authorization_failed');
+      const output=migrationFailure(error);assert.equal(output.stage,'create_collection');assert.equal(output.collection,'tasks');assert.equal(output.mongo_code,13);assert.equal(output.reason,'authorization_failed');
       assert.ok(!JSON.stringify(output).includes('migration_reader'));assert.ok(!JSON.stringify(output).includes('migration_read_only'));return true;
     });}finally{await limited.close();}
   });
@@ -94,18 +99,18 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     assert.equal(await new MongoStore(db).enqueue(thread,config,now),false);await worker.tick();assert.equal(sends,2);
   });
   await t.test('partial unique index protects task changes and member mappings',async()=>{
-    await tasks.map(guild,actor,'aaaaaaaaaaaaaaaaaaaaaaaa');assert.equal(await tasks.member(guild,actor),'aaaaaaaaaaaaaaaaaaaaaaaa');
-    await assert.rejects(tasks.map(guild,'900000000000000104','aaaaaaaaaaaaaaaaaaaaaaaa'),error=>error.code===11000);
-    await tasks.begin('one','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{idList:'list'});
-    await assert.rejects(tasks.begin('two','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{}),error=>error.code===11000);
-    await tasks.finish('one',{kind:'status'});assert.equal(await tasks.pending('bbbbbbbbbbbbbbbbbbbbbbbb'),undefined);
+    await taskStore.map(guild,actor,'aaaaaaaaaaaaaaaaaaaaaaaa');assert.equal(await taskStore.member(guild,actor),'aaaaaaaaaaaaaaaaaaaaaaaa');
+    await assert.rejects(taskStore.map(guild,'900000000000000104','aaaaaaaaaaaaaaaaaaaaaaaa'),error=>error.code===11000);
+    await taskStore.begin('one','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{idList:'list'});
+    await assert.rejects(taskStore.begin('two','bbbbbbbbbbbbbbbbbbbbbbbb',actor,'status',{}),error=>error.code===11000);
+    await taskStore.finish('one',{kind:'status'});assert.equal(await taskStore.pending('bbbbbbbbbbbbbbbbbbbbbbbb'),undefined);
   });
   await t.test('task service confirms updates using MongoDB state',async()=>{
     const board='cccccccccccccccccccccccc',card={id:'aaaaaaaaaaaaaaaaaaaaaaaa',idBoard:board,idList:'old',idMembers:[],name:'Example',desc:'CMSFTC_THREAD_ID='+thread,closed:false,shortUrl:'https://trello.com/c/example1'};
-    const trello={board:async()=>({id:board,closed:false}),card:async()=>({...card}),lists:async()=>[{id:'list',idBoard:board,closed:false}],update:async(_,patch)=>Object.assign(card,patch)};
-    const service=new TaskService({store:tasks,proposalStore:queue,trello,config,policy:{mode:'forum'}});
+    const tasks={board:async()=>({id:board,closed:false}),card:async()=>({...card}),lists:async()=>[{id:'list',idBoard:board,closed:false}],update:async(_,patch)=>Object.assign(card,patch)};
+    const service=new TaskService({store:taskStore,proposalStore:queue,tasks,config,policy:{mode:'forum'}});
     await service.execute({id:'900000000000000105',thread:{id:thread,guildId:guild,parentId:forum,type:11},actor:{id:actor,canViewForum:true},kind:'status',input:{status:'list'}});
-    assert.equal(card.idList,'list');assert.equal((await tasks.get('900000000000000105')).state,'succeeded');
+    assert.equal(card.idList,'list');assert.equal((await taskStore.get('900000000000000105')).state,'succeeded');
   });
   await t.test('meetings use transactions for dates, cancellation, and record history',async()=>{
     await meetings.set(meetingChannelId,'2026-10-20','19:00',actor,'Room',now,'20:30');
@@ -180,10 +185,10 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
   await t.test('team creation receipts persist, reconcile lost replies and bind existing task controls and PM',async()=>{
     const creation=new MongoCreationStore(db),parent='900000000000000010',teamThread='900000000000000120',operation='900000000000000121';
     const board='eeeeeeeeeeeeeeeeeeeeeeee',list='ffffffffffffffffffffffff';let writes=0,pings=0,threads=0;const cards=[];
-    const trello={board:async()=>({id:board}),lists:async()=>[{id:list,idBoard:board,name:'待執行'}],card:async()=>cards[0],cardsForThread:async()=>cards,
-      create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://trello.com/c/example2',closed:false});throw Error('task_trello_unconfirmed');}};
+    const tasks={board:async()=>({id:board}),lists:async()=>[{id:list,idBoard:board,name:'待執行'}],card:async()=>cards[0],cardsForThread:async()=>cards,
+      create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://discord.com/channels/'+guild+'/'+teamThread,closed:false});throw Error('task_storage_unconfirmed');}};
     const discord={createThread:async()=>{threads++;return {id:teamThread,guildId:guild,parentId:parent,type:11};},notify:async()=>{pings++;return {id:actor};}};
-    const service=new TaskCreationService({store:creation,trello,discord,authorize:async()=>{}});
+    const service=new TaskCreationService({store:creation,tasks,discord,authorize:async()=>{}});
     const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:[actor,'900000000000000122'],status:list,due:'2026-10-20'}};
     await assert.rejects(service.create(op));assert.equal((await creation.get(operation)).state,'card_pending');assert.equal(pings,0);
     assert.deepEqual((await new MongoCreationStore(db).get(operation)).input.assigner,op.input.assigner);
@@ -191,7 +196,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await Promise.all([restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor}),restarted.reconcile(operation,{guild_id:guild,channel_id:parent,actor_id:actor})]);
     assert.equal(writes,1);assert.equal(threads,1);assert.equal(pings,1);
     assert.equal((await queue.get(teamThread)).status,'succeeded');
-    const controls=new TaskService({store:tasks,proposalStore:queue,trello,config,policy:{mode:'forum'}});
+    const controls=new TaskService({store:taskStore,proposalStore:queue,tasks,config,policy:{mode:'forum'}});
     assert.equal((await controls.context({id:teamThread,guildId:guild,parentId:parent,type:11},{id:actor,canViewForum:true})).id,cards[0].id);
     assert.equal(await new MongoDeliveryStore(db).isBoundTask(guild,parent,teamThread,cards[0].id),true);
     assert.equal(await new MongoDeliveryStore(db).isBoundTask(guild,forum,teamThread,cards[0].id),false);
@@ -210,6 +215,97 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     await assert.rejects(creation.finish(id,{id:'dddddddddddddddddddddddd',shortUrl:'https://trello.com/c/example2'}),/create_binding_conflict/);
     assert.equal((await creation.get(id)).state,'card_pending');assert.equal((await queue.get(teamThread)).status,'pending');
   });
+  await t.test('native tasks create, edit, restart and complete without Trello or Make requests',async()=>{
+    const parent='900000000000000010',tid='900000000000000150',op='900000000000000151';
+    const native=new MongoTasks(db,config),creation=new MongoCreationStore(db);let threads=0,pings=0;
+    const service=new TaskCreationService({store:creation,tasks:native,authorize:async()=>{},discord:{
+      createThread:async()=>{threads++;return {id:tid,guildId:guild,parentId:parent,type:11};},
+      notify:async()=>{pings++;return {id:actor};}}});
+    const input={title:'Native task',description:'Work and acceptance criteria',ids:[actor],assigner:[actor],status:'doing',start:'2026-11-17',due:'2026-11-18'};
+    const oldFetch=globalThis.fetch;globalThis.fetch=()=>assert.fail('task storage must not use HTTP');
+    try {
+      const request={id:op,guild,channel:parent,actor,input};
+      await Promise.all([service.create(request),service.create(request).catch(error=>assert.match(error.message,/create_thread_uncertain|create_pending/))]);
+      await new TaskCreationService({...service,store:new MongoCreationStore(db)}).create({id:op,guild,channel:parent,actor,input});
+      assert.equal(threads,1);assert.equal(pings,1);assert.equal(await db.collection('tasks').countDocuments({thread_id:tid}),1);
+      const bound=JSON.parse((await queue.get(tid)).ack),task=await native.card(bound.task_id);
+      assert.equal(task.shortUrl,'https://discord.com/channels/'+guild+'/'+tid);
+      const thread={id:tid,guildId:guild,parentId:parent,type:11},manager={id:actor,canViewForum:true,teamTask:true,canSend:true};
+      const controls=new TaskService({store:taskStore,proposalStore:queue,tasks:new MongoTasks(db,config),config,policy:{mode:'forum'}});
+      await assert.rejects(controls.context({...thread,parentId:forum},manager),/task_card_mismatch/);
+      const edit={id:'900000000000000152',thread,actor:manager,kind:'edit',input:{ids:[actor],assigner:[actor],description:'Updated',start:'2026-11-17',due:'2026-11-19',status:'doing'}};
+      await controls.execute(edit);await new TaskService({...controls,store:new MongoTaskStore(db)}).execute(edit);
+      assert.equal((await native.card(task.id)).version,1);
+      const stale=await native.card(task.id);await native.update(task.id,{due:'2026-11-20T15:59:00.000Z'},{version:stale.version});
+      await assert.rejects(native.update(task.id,{due:null},{version:stale.version}),/task_conflict/);
+      const update=controls.tasks.update.bind(controls.tasks);
+      controls.tasks.update=async(...args)=>{await update(...args);throw Error('task_storage_unconfirmed');};
+      await assert.rejects(controls.execute({...edit,id:'900000000000000153',kind:'dates',input:{due:'2026-11-21'}}),/task_storage_unconfirmed/);
+      const restarted=new TaskService({...controls,tasks:new MongoTasks(db,config)});
+      await restarted.reconcile(thread,manager);
+      assert.equal((await taskStore.get('900000000000000153')).state,'succeeded');
+      const report=analyze(await native.snapshot(),{now:Date.parse('2026-11-21T15:30:00Z')});
+      assert.equal(report.tasks.find(t=>t.task_id===task.id).deadline_phase,'1h');
+      await restarted.execute({...edit,id:'900000000000000154',kind:'status',input:{status:'done'}});
+      const completed=(await native.card(task.id)).completed_at;
+      await restarted.execute({...edit,id:'900000000000000155',input:{...edit.input,status:'done'}});
+      assert.equal((await native.card(task.id)).completed_at,completed);
+      const done=(await collectReport(db,{DISCORD_GUILD_ID:guild,DISCORD_FORUM_CHANNEL_ID:forum})).tasks.find(t=>t.task_id===task.id);
+      assert.equal(done.stage,'done');assert.equal(done.deadline_phase,null);assert.deepEqual(done.warnings,[]);
+    } finally {globalThis.fetch=oldFetch;}
+  });
+  await t.test('native creation recovers a failed database write without creating another Discord thread',async()=>{
+    const native=new MongoTasks(db,config),create=native.create.bind(native),tid='900000000000000160';let threads=0;
+    native.create=async()=>{throw Error('database unavailable');};
+    const service=new TaskCreationService({store:new MongoCreationStore(db),tasks:native,authorize:async()=>{},discord:{
+      createThread:async()=>{threads++;return {id:tid,guildId:guild,parentId:'900000000000000010',type:11};},notify:async()=>({id:actor})}});
+    const op={id:'900000000000000161',guild,channel:'900000000000000010',actor,input:{title:'Recover',description:'Synthetic',ids:[actor],assigner:actor,status:'todo'}};
+    await assert.rejects(service.create(op));native.create=create;
+    await service.reconcile(op.id,{guild_id:guild,channel_id:op.channel,actor_id:actor});
+    assert.equal(threads,1);assert.equal(await db.collection('tasks').countDocuments({thread_id:tid}),1);
+  });
+  await t.test('forum ingestion keeps full original content and attachments, writes once and binds PM',async()=>{
+    const native=new MongoTasks(db,config),tid='900000000000000170';let notices=0;
+    const proposal={guild_id:guild,forum_channel_id:forum,thread_id:tid,title:'Forum proposal',content:'Original CMSFTC_THREAD_ID=text '+ 'x'.repeat(5000),
+      author_id:actor,author_name:'Synthetic',tags:['Example'],attachments:[{filename:'example.txt',url:'https://example.org/file'}],created_at:new Date(now).toISOString(),discord_url:'https://discord.com/channels/'+guild+'/'+tid};
+    await queue.enqueue(tid,config,now);
+    const worker=new Worker({store:queue,config,discord:{fetchProposal:async()=>proposal,notify:async()=>{notices++;return {id:actor};}},send:p=>native.proposal(p),log:()=>{},now:()=>now});
+    await worker.tick();await worker.tick();
+    const ack=JSON.parse((await queue.get(tid)).ack),task=await native.card(ack.task_id);
+    assert.equal(task.proposal.content,proposal.content);assert.deepEqual(task.proposal.attachments,proposal.attachments);assert.equal(task.idList,'idea');
+    await native.proposal(proposal);assert.equal(await db.collection('tasks').countDocuments({thread_id:tid}),1);assert.equal(notices,1);
+    assert.ok((await native.snapshot()).cards.some(c=>c.id===task.id));
+    await assert.rejects(native.card('ffffffffffffffffffffffff'),/task_legacy_unavailable/);
+  });
+  await t.test('legacy import previews first, preserves source and receipts, and never overwrites native tasks',async()=>{
+    const tid='900000000000000175',id='1234567890abcdef12345678',legacyAck=JSON.stringify({trello_card_id:id,trello_card_url:'https://trello.com/c/example1'});
+    await db.collection('proposals').insertOne({_id:tid,guild_id:guild,forum_id:forum,status:'succeeded',ack:legacyAck,received_at:now});
+    const card={id,idBoard:'board',idList:'list',name:'Legacy',desc:'CMSFTC_THREAD_ID='+tid,idMembers:['aaaaaaaaaaaaaaaaaaaaaaaa'],start:null,due:'2026-11-30T15:59:00Z',closed:false};
+    const snapshot={id:'board',lists:[{id:'list',name:'進行中'}],cards:[card]},scope={...config,channelIds:['900000000000000010']};
+    assert.equal((await importTasks(db,snapshot,scope)).results.eligible,1);assert.equal(await db.collection('tasks').countDocuments({_id:id}),0);
+    await taskStore.begin('legacy-pending',id,actor,'dates',{due:null});
+    assert.equal((await importTasks(db,snapshot,scope,{apply:true})).results.pending_update,1);
+    await taskStore.fail('legacy-pending');
+    const imported=await importTasks(db,snapshot,scope,{apply:true});assert.equal(imported.results.imported,1);
+    const row=await db.collection('tasks').findOne({_id:id});assert.equal(row.idList,'doing');assert.deepEqual(row.legacy_card,card);assert.deepEqual(discordOwners(row.desc),[{id:actor,name:actor}]);
+    assert.equal((await queue.get(tid)).legacy_ack,legacyAck);assert.equal(JSON.parse((await queue.get(tid)).ack).task_id,id);
+    assert.equal((await importTasks(db,snapshot,scope,{apply:true})).results.unbound_or_already_imported,1);
+    assert.equal((await db.collection('tasks').findOne({_id:id})).version,0);
+    const other={...card,id:'2234567890abcdef12345678',desc:'CMSFTC_THREAD_ID=900000000000000176'};
+    assert.equal((await importTasks(db,{...snapshot,cards:[other]},scope,{apply:true})).results.unbound_or_already_imported,1);
+    assert.equal((await importTasks(db,{...snapshot,cards:[card,{...card,id:'3234567890abcdef12345678'}]},scope)).results.duplicate_thread,2);
+  });
+  await t.test('legacy import rolls back task creation if updating the binding fails',async()=>{
+    const tid='900000000000000177',id='4234567890abcdef12345678',ack=JSON.stringify({trello_card_id:id});
+    await db.collection('proposals').insertOne({_id:tid,guild_id:guild,forum_id:forum,status:'succeeded',ack,received_at:now});
+    const snapshot={id:'board',lists:[{id:'list',name:'待執行'}],cards:[{id,idBoard:'board',idList:'list',name:'Rollback',desc:'CMSFTC_THREAD_ID='+tid,idMembers:[],start:null,due:null}]};
+    const collection=db.collection.bind(db),proposals=collection('proposals');
+    db.collection=name=>name==='proposals'?{findOne:(...args)=>proposals.findOne(...args),updateOne:async()=>{throw Error('synthetic failure');}}:collection(name);
+    try {await assert.rejects(importTasks(db,snapshot,config,{apply:true}),/synthetic failure/);}
+    finally {db.collection=collection;}
+    assert.equal(await db.collection('tasks').findOne({_id:id}),null);assert.equal((await queue.get(tid)).ack,ack);
+    snapshot.cards[0].idList='custom';assert.equal((await importTasks(db,snapshot,config)).results.unknown_status_or_board,1);
+  });
   await t.test('Bank baseline, atomic claim and receipts survive store and monitor restarts',async()=>{
     const bank=new MongoBankStore(db),source='synthetic_bank_source',tasks=[{id:'1',active:true,url:'https://bank.example.org/mission/1'}];
     assert.deepEqual(await bank.recordSnapshot(source,tasks,now),{initial:true,queued:0});assert.equal(await bank.claim(source,now),null);
@@ -217,7 +313,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     assert.deepEqual(await bank.recordSnapshot(source,tasks,now),{initial:false,queued:1});
     const claims=await Promise.all([bank.claim(source,now),new MongoBankStore(db).claim(source,now)]);assert.equal(claims.filter(Boolean).length,1);
     const row=claims.find(Boolean);await bank.sent(row,actor);assert.equal(await new MongoBankStore(db).claim(source,now),null);
-    assert.deepEqual(await bank.recordSnapshot(source,tasks.map(t=>({...t,title:'Updated'})),now),{initial:false,queued:0});
+    assert.deepEqual(await bank.recordSnapshot(source,taskStore.map(t=>({...t,title:'Updated'})),now),{initial:false,queued:0});
     const env={BANK_ENABLED:'true',BANK_BASE_URL:'https://bank.example.org',BANK_CHANNEL_ID:'900000000000000180',DISCORD_GUILD_ID:guild};
     let current=[tasks[0]],sends=0;
     const options={state:db,env,log:()=>{},now:()=>now,read:async()=>current,discord:{verify:async()=>{},findSent:async()=>[],send:async()=>{sends++;return {id:actor};}}};

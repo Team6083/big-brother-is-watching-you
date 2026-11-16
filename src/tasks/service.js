@@ -15,7 +15,7 @@ export function parseDate(value,end=false) {
 }
 
 export class TaskService {
-  constructor({store,proposalStore,trello,config,policy}) { Object.assign(this,{store,proposalStore,trello,config,policy}); }
+  constructor({store,proposalStore,tasks,config,policy}) { Object.assign(this,{store,proposalStore,tasks,config,policy}); }
   canManage(actor) {
     if(actor.bot || !actor.canViewForum || (actor.teamTask && !actor.canSend))return false;
     // Preserve legacy roles unless this deployment explicitly trusts team-channel permissions.
@@ -26,12 +26,13 @@ export class TaskService {
     if(!isTaskThread(thread,this.config) || !snowflake(thread.id) || actor.bot || !actor.canViewForum)throw new Error('task_outside_forum');
     const row=await this.proposalStore.get(thread.id);
     if(!row || row.status!=='succeeded')throw new Error('task_not_synced');
-    let id;try{id=JSON.parse(row.ack).trello_card_id;}catch{}
+    let id;try{const ack=JSON.parse(row.ack);id=ack.task_id||ack.trello_card_id;}catch{}
     if(!cardId(id))throw new Error('task_not_synced');
     if(thread.parentId!==this.config.forumId && (row.guild_id!==this.config.guildId || row.forum_id!==thread.parentId))throw new Error('task_not_synced');
-    const [board,card]=await Promise.all([this.trello.board(),this.trello.card(id)]);
+    const [board,card]=await Promise.all([this.tasks.board(),this.tasks.card(id)]);
     if(board.closed || card.closed || card.id!==id || card.idBoard!==board.id ||
         !new RegExp(`(?:^|\\n)CMSFTC_THREAD_ID\\s*=\\s*${thread.id}(?:\\s|$)`).test(card.desc || ''))throw new Error('task_card_mismatch');
+    if(card.channel_id && (card.guild_id!==this.config.guildId || card.channel_id!==thread.parentId))throw new Error('task_card_mismatch');
     return card;
   }
   async authorize(kind,actor,card) {
@@ -43,7 +44,7 @@ export class TaskService {
   }
   async mapMember(actor,discordId,trelloId) {
     if(!this.canManage(actor) || !snowflake(discordId) || !cardId(trelloId))throw new Error('task_forbidden');
-    const members=await this.trello.members();
+    const members=await this.tasks.members();
     if(!members.some(m=>m.id===trelloId))throw new Error('task_member_not_on_board');
     try{await this.store.map(this.config.guildId,discordId,trelloId);}catch{throw new Error('task_mapping_conflict');}
   }
@@ -59,7 +60,7 @@ export class TaskService {
     if(await this.store.pending(card.id))throw new Error('task_pending_review');
     let payload;
     if(kind==='status') {
-      const lists=await this.trello.lists();
+      const lists=await this.tasks.lists();
       if(!lists.some(l=>l.id===input.status && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');
       payload={idList:input.status};
     } else if(kind==='description') {
@@ -69,7 +70,7 @@ export class TaskService {
       if(!ids.length || ids.length>5 || ids.some(id=>!snowflake(id)))throw new Error('task_invalid_owners');
       const assignees=assigneeIds(input.assigner);
       const person=id=>({id,name:String(input.names?.[id] || id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
-      const lists=await this.trello.lists();
+      const lists=await this.tasks.lists();
       if(!lists.some(l=>l.id===input.status && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');
       payload={desc:withDiscordAssigner(withDiscordOwners(card.desc,ids.map(person)),assignees.map(person)),idList:input.status};
       if(input.description!==undefined)payload.desc=withTaskDescription(payload.desc,input.description);
@@ -99,9 +100,9 @@ export class TaskService {
       card=await this.context(thread,actor);await this.authorize(kind,actor,card);
       if(kind==='owners'){payload.desc=withDiscordOwners(card.desc,discordOwners(payload.desc));await this.store.savePayload(id,payload);}
       if(kind==='description'){payload.desc=withTaskDescription(card.desc,input.text);await this.store.savePayload(id,payload);}
-      if(kind==='status'){const lists=await this.trello.lists();if(!lists.some(l=>l.id===payload.idList && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');}
+      if(kind==='status'){const lists=await this.tasks.lists();if(!lists.some(l=>l.id===payload.idList && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');}
       if(kind==='edit') {
-        const lists=await this.trello.lists();
+        const lists=await this.tasks.lists();
         if(!lists.some(l=>l.id===payload.idList && !l.closed && l.idBoard===card.idBoard))throw new Error('task_invalid_status');
         const person=id=>({id,name:String(input.names?.[id] || id).replace(/[\r\n<>@]/g,' ').slice(0,100)});
         payload.desc=withDiscordAssigner(withDiscordOwners(card.desc,[...new Set(input.ids)].map(person)),assigneeIds(input.assigner).map(person));
@@ -117,20 +118,20 @@ export class TaskService {
     let result;
     try {
       if(kind==='progress') {
-        const action=await this.trello.progress(card.id,payload.text);
-        if(!cardId(action.id) || action.data?.card?.id!==card.id || action.data?.text!==payload.text)throw new Error('task_trello_unconfirmed');
+        const action=await this.tasks.progress(card.id,payload.text);
+        if(!cardId(action.id) || action.data?.card?.id!==card.id || action.data?.text!==payload.text)throw new Error('task_storage_unconfirmed');
         result={kind,card_id:card.id,action_id:action.id,url:card.shortUrl};
       } else {
-        const updated=await this.trello.update(card.id,payload);
+        const updated=await this.tasks.update(card.id,payload,{version:card.version});
         if(updated.id!==card.id || updated.idBoard!==card.idBoard ||
             (['owners','description'].includes(kind) && updated.desc!==payload.desc) ||
-            (['dates','edit','status'].includes(kind) && Object.keys(payload).some(key=>['start','due'].includes(key)?!sameDate(updated[key] ?? null,payload[key]):updated[key]!==payload[key])))throw new Error('task_trello_unconfirmed');
+            (['dates','edit','status'].includes(kind) && Object.keys(payload).some(key=>['start','due'].includes(key)?!sameDate(updated[key] ?? null,payload[key]):updated[key]!==payload[key])))throw new Error('task_storage_unconfirmed');
         result={kind,card_id:card.id,url:card.shortUrl};
       }
       await this.store.finish(id,result);return result;
     } catch(error) {
-      if(error.message==='task_trello_rejected')await this.store.fail(id);
-      throw error;
+      if(error.message==='task_conflict') {await this.store.fail(id);throw error;}
+      throw new Error('task_storage_unconfirmed');
     }
   }
   async reconcile(thread,actor) {
@@ -139,7 +140,7 @@ export class TaskService {
     if(!pending)throw new Error('task_nothing_to_reconcile');
     const payload=JSON.parse(pending.payload);let actionId;
     if(pending.kind==='progress') {
-      const actions=await this.trello.comments(card.id,new Date(pending.created_at-1000).toISOString());
+      const actions=await this.tasks.comments(card.id,new Date(pending.created_at-1000).toISOString());
       actionId=actions.find(a=>a.data?.text===payload.text && a.data?.card?.id===card.id)?.id;
       if(!cardId(actionId))throw new Error('task_pending_review');
     } else if(pending.kind==='owners') {

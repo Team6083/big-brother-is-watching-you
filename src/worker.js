@@ -37,7 +37,7 @@ export class Worker {
     let ack;
     try { ack = await this.send(JSON.parse(row.payload)); }
     catch (error) {
-      return this.retryOrFail(row, error instanceof SyncError ? error : new SyncError('make_request_failed'), row.send_attempts);
+      return this.retryOrFail(row, error instanceof SyncError ? error : new SyncError('task_storage_failed'), row.send_attempts);
     }
     await this.store.update(row, {
       status: 'succeeded', ack: JSON.stringify(ack), last_error: null, confirmed_at: this.now(),
