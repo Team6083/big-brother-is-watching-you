@@ -14,9 +14,9 @@ export class MongoCreationStore {
       const row=await this.rows.findOne({_id:id},{session});
       if(row?.state==='succeeded' && row.card_id===card.id)return;
       if(row?.state!=='card_pending')throw new Error('create_pending');
-      const ack=JSON.stringify({thread_id:row.thread_id,trello_card_id:card.id,trello_card_url:card.shortUrl});
+      const ack=JSON.stringify({thread_id:row.thread_id,task_id:card.id,task_url:card.shortUrl});
       const proposals=this.db.collection('proposals'),existing=await proposals.findOne({_id:row.thread_id},{session});
-      if(existing && (existing.guild_id!==row.guild_id || existing.forum_id!==row.channel_id || existing.status!=='succeeded' || JSON.parse(existing.ack).trello_card_id!==card.id))throw new Error('create_binding_conflict');
+      if(existing && (existing.guild_id!==row.guild_id || existing.forum_id!==row.channel_id || existing.status!=='succeeded' || JSON.parse(existing.ack).task_id!==card.id))throw new Error('create_binding_conflict');
       if(!existing)await proposals.insertOne({_id:row.thread_id,thread_id:row.thread_id,guild_id:row.guild_id,forum_id:row.channel_id,status:'succeeded',ack,
         payload:null,task_snapshot:null,fetch_attempts:0,send_attempts:0,next_attempt_at:0,lease_until:0,lease_token:null,last_error:null,
         received_at:row.created_at,confirmed_at:Date.now(),notification_status:'skipped',notification_attempts:0,notification_message_id:null,notification_error:null},{session});

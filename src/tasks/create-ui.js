@@ -2,7 +2,7 @@ import {ActionRowBuilder,ButtonBuilder,ButtonStyle,LabelBuilder,ModalBuilder,Sla
 import {assigneeIds} from './owners.js';
 
 export const createTaskCommand=new SlashCommandBuilder().setName('建立任務').setDescription('在隊長／幹部頻道建立任務；人員、日期與狀態用選的')
-  .addStringOption(o=>o.setName('核對編號').setDescription('僅核對先前結果不明的建立操作，不會再次建卡').setRequired(false));
+  .addStringOption(o=>o.setName('核對編號').setDescription('僅核對先前結果不明的建立操作，不會再次建立任務').setRequired(false));
 export const safeTaskText=value=>String(value||'').replace(/@/g,'＠').replace(/[<>`]/g,' ');
 export const taskTemplate='工作內容：\n\n完成標準：\n\n參考資料／連結（沒有可填「無」）：\n';
 const button=(action,id,label,style=ButtonStyle.Secondary)=>new ButtonBuilder().setCustomId(`create_task:${action}:${id}`).setLabel(label).setStyle(style);

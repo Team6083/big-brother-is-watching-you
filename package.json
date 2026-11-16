@@ -16,7 +16,8 @@
     "tasks:register": "node src/tasks/register.js",
     "dev": "node --env-file-if-exists=.env src/index.js",
     "migrate": "node src/state/migrate.js",
-    "audit:public": "node scripts/check-public.mjs"
+    "audit:public": "node scripts/check-public.mjs",
+    "tasks:import": "node src/tasks/import.js"
   },
   "dependencies": {
     "discord.js": "14.27.0",

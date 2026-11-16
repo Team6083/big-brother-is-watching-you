@@ -1,3 +1,5 @@
+# 歷史文件：新版 runtime 不再使用 Make 或 Trello；僅保留供舊資料核對。
+
 # Make Webhook 契約與去重
 
 Bot 只接收指定 Discord guild／forum 的新文章。首則訊息最多抓取 5 次；HTTP timeout 15 秒，暫時性錯誤最多 5 次指數退避。Thread ID 是永久提案識別碼，重啟後保留。

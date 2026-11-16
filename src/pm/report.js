@@ -52,7 +52,7 @@ export function analyze(snapshot, { now = Date.now(), ignoredMembers = [], trust
       start_date: c.start || null, due_date: c.due || null, created_at: created, updated_at: c.dateLastActivity || null,
       last_progress_update: progress, discord_thread_id: threadId,
       discord_url: /https:\/\/discord\.com\/channels\/\d+\/\d+/.exec(c.desc || '')?.[0] || null,
-      trello_card_id: c.id, trello_url: cardUrl(c.shortUrl), priority: null,
+      ...(snapshot.source==='mongodb'?{storage:'mongodb',task_url:c.shortUrl}:{trello_card_id:c.id,trello_url:cardUrl(c.shortUrl)}),priority:null,
       needs_help: labels.includes('需要協助'), review_status: stage === 'review' ? 'pending' : null,
       announcement_status: stage === 'announcement' ? 'pending' : null,
       completed_at: stage === 'done' ? completed : null, active, deadline_phase: deadlinePhase, warnings,

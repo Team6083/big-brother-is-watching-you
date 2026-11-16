@@ -52,17 +52,17 @@ test('migration failures retain the exact collection operation and index without
       collection:name=>({createIndex:async(fields,options)=>{calls.push({name,fields,options});if(name==='task_members')throw failure('MongoServerError',{code:85});}})};
     await assert.rejects(migrate(db),error=>{
       const output=migrationFailure(error);assert.equal(output.code,'mongodb_migration_failed');assert.equal(output.stage,stage);
-      assert.equal(output.collection,stage==='create_index'?'task_members':'proposals');assert.equal(output.index,stage==='create_index'?'member_trello_unique':undefined);
+      assert.equal(output.collection,stage==='create_index'?'task_members':'tasks');assert.equal(output.index,stage==='create_index'?'member_trello_unique':undefined);
       assert.ok(!JSON.stringify(output).includes(secret));return true;
     });
-    if(stage==='create_index')assert.equal(calls[1].options.unique,true);
+    if(stage==='create_index')assert.equal(calls.find(c=>c.name==='task_members').options.unique,true);
   }
 });
 
 test('NamespaceExists during concurrent collection creation is still ignored',async()=>{
   let indexes=0;
   await migrate({database:{listCollections:()=>({toArray:async()=>[]}),createCollection:async()=>{throw failure('MongoServerError',{code:48});}},collection:()=>({createIndex:async()=>{indexes++;}})});
-  assert.equal(indexes,3);
+  assert.equal(indexes,4);
 });
 
 test('actual migration CLI returns one safe JSON failure and a nonzero exit status',()=>{

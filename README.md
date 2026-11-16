@@ -1,14 +1,14 @@
 # Big Brother Is Watching You
 
-Discord 專案管理 Bot。成員在 Discord 討論及更新任務，Trello 保存正式任務資料，MongoDB replica set 保存同步、去重、提醒與會議狀態。
+Discord 專案管理 Bot。成員在 Discord 討論及更新任務，MongoDB replica set 保存正式任務、去重、提醒與會議狀態。任務功能不再需要 Trello 或 Make。
 
 **只需一個常駐程序：`npm start`。** Discord 指令、論壇提案、會議提醒、PM 定時追蹤及選用的 Bank 新任務通知在同一程序內運作，共用一組 MongoDB 連線；啟用 `PM_ENABLED=true` 就會排程 PM，不需另外啟動 PM worker。
 
 ## 功能
 
-- 指定論壇新貼文經 Make 同步至 Trello；一般聊天與後續留言不會另建卡片。
+- 指定論壇新貼文直接收錄為 MongoDB 任務；保留原始內容、標籤及附件資訊，一般聊天與後續留言不另建任務。
 - `/任務`：查看任務、Owner／Assignee、描述、開始／截止日期，以及更新狀態。
-- `/建立任務`：在允許的隊長／幹部文字頻道填寫內容、選人員／日期／狀態，預覽後建立任務討論串及共用看板卡片。
+- `/建立任務`：在允許的隊長／幹部文字頻道填寫內容、選人員／日期／狀態，預覽後建立任務討論串並儲存任務。
 - 截止前 24 小時、1 小時及逾期各提醒一次，發在任務原討論串。
 - `/會議設定`：選日期及開始／結束時間、填地點、預覽後確認；會議前一天台灣時間 17:00 提及指定角色。
 - 會議設定／編輯內填寫會議記錄連結；過去日期可從 `/會議設定` 的「既有會議記錄」補登。`/查看會議記錄` 從已登錄日期查詢連結。
@@ -20,7 +20,7 @@ AI 分析、自動決策及 AI 代為發布公告尚未實作。
 
 ## 開發與執行
 
-需要 Node.js 24.21 以上的 24.x，以及 MongoDB replica set。測試版本預設 8.0.17；團隊伺服器版本需另行確認，再用 `MONGOMS_VERSION` 對齊測試。開發與正式環境使用不同 Bot Token、看板、Webhook 與 database。
+需要 Node.js 24.21 以上的 24.x，以及 MongoDB replica set。測試版本預設 8.0.17；團隊伺服器版本需另行確認，再用 `MONGOMS_VERSION` 對齊測試。開發與正式環境使用不同 Bot Token 與 database。
 
 ```sh
 npm ci
@@ -54,7 +54,6 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 |---|---|
 | `DISCORD_BOT_TOKEN` | Bot Token，機密 |
 | `DISCORD_GUILD_ID`、`DISCORD_FORUM_CHANNEL_ID` | 指定伺服器與提案論壇 |
-| `MAKE_WEBHOOK_URL`、`MAKE_WEBHOOK_API_KEY` | 私密 Webhook 及選用驗證金鑰 |
 | `MONGODB_URI` | MongoDB 連線字串，機密；路徑必須包含專用 database 名稱，取代舊 `DATABASE_URL` |
 | `DISCORD_NOTIFY` | 提案成功回覆，預設 true |
 | `TASK_CONTROLS_ENABLED` | 啟用任務控制，預設 false；文字頻道操作另需設定允許頻道 |
@@ -62,12 +61,8 @@ Migration 失敗會以 JSON 回報步驟、集合／索引、MongoDB／網路錯
 | `TASK_MANAGER_ROLE_IDS` | `roles` 模式允許的角色，逗號分隔 |
 | `TASK_ALLOWED_CHANNEL_IDS` | 隊長／幹部任務文字頻道 ID，逗號分隔；留空停用 |
 | `TEAM_CHANNEL_ACCESS_ENABLED` | 預設 false，保留舊權限；明確設為 true 且任務控制啟用後，上述頻道依 Discord 權限使用全部任務／會議功能，不額外要求管理角色 |
-| `TRELLO_BOARD_ID`、`TRELLO_API_KEY` | 看板與 API Key |
-| `TRELLO_WRITE_TOKEN` | 任務更新用 read/write Token，機密 |
-| `TRELLO_READ_TOKEN` | PM 查詢用 Token，機密 |
 | `PM_ENABLED` | 在主 Bot 啟用 PM 定時提醒，預設 false |
 | `PM_INTERVAL_MS` | 掃描間隔，預設 60000；允許 60000～86400000 |
-| `PM_TRELLO_AUTOMATION_MEMBER_IDS` | 排除的自動化成員，逗號分隔 |
 | `BANK_ENABLED` | 在主 Bot 啟用 Bank 新任務通知，預設 false |
 | `BANK_BASE_URL` | Bank 來源網站的 HTTPS 根網址，例如 `https://bank.example.org` |
 | `BANK_CHANNEL_ID` | Bank 任務通知的 Discord 文字頻道 ID |
@@ -78,15 +73,15 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 
 ## 隊長／幹部建立任務
 
-啟用及故障核對完整步驟見 [文字頻道任務](docs/team-tasks.md)。成員不需要 Trello 帳號。
+啟用及故障核對完整步驟見 [文字頻道任務](docs/team-tasks.md)。直接在 Discord 操作。
 
 1. 在允許的文字頻道輸入 `/建立任務`，按「填寫任務」。
-2. 填任務名稱及描述模板；用選單選 Owner（1–5 位）、Assignee（1–5 位）及既有看板狀態。
+2. 填任務名稱及描述模板；用選單選 Owner（1–5 位）、Assignee（1–5 位）及任務狀態。
 3. 在私人預覽中按「選擇開始日期」「選擇截止日期」，選年、月、日；26 日以後可翻頁，也可不設定／清除。開始採台灣時間 00:00，截止採 23:59。
-4. 按「確認建立」。Bot 在原頻道底下開討論串，直接以既有 Trello 寫入授權建立卡片，不經 Make；一般論壇提案仍沿用 Make。
-5. 實際確認建卡並保存綁定後，才在新討論串張貼描述、日期與狀態並 @Owner／Assignee。後續在此使用 `/任務`；PM 的到期提醒也留在此討論串。
+4. 按「確認建立」。Bot 在原頻道底下開討論串，將任務存進 MongoDB；一般論壇提案也直接存入相同資料庫。
+5. 確認任務已儲存並保存綁定後，才在新討論串張貼描述、日期與狀態並 @Owner／Assignee。後續在此使用 `/任務`；PM 的到期提醒也留在此討論串。
 
-本次新增建立表單的日期全部使用選單；既有 `/任務` 的修改表單仍沿用原本的日期欄位。未確認建立前的草稿保留 15 分鐘，重啟後須重填；已送出的操作及建卡核對紀錄保存在 MongoDB。
+本次新增建立表單的日期全部使用選單；既有 `/任務` 的修改表單仍沿用原本的日期欄位。未確認建立前的草稿保留 15 分鐘，重啟後須重填；已送出的操作及建立核對紀錄保存在 MongoDB。
 
 ## Bank 新任務通知
 
@@ -96,16 +91,16 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 
 來源 API 沒有發布時間欄位，因此這是偵測「新出現的任務 ID」。首次排程只記錄基準，之後新任務在下一個檢查時段公告，另受來源快取與網路延遲影響；停機錯過時段會等重啟後的下一個時段，不補跑每個錯過的時段。舊的 `BANK_INTERVAL_MS` 設定已移除。升級需先執行 `npm run migrate` 建立 `bank_notifications` collection；部署及真實網站／Discord 驗收尚需由部署負責人執行。
 
-## Discord 與 Make
+## Discord 設定
 
 1. 管理員建立 Bot，開啟 Message Content Intent，以 `bot`、`applications.commands` scopes 邀請。
 2. 只授權指定論壇／頻道，不要求 Administrator。論壇需要 View Channel、Read Message History，回覆需 Send Messages in Threads。
 3. 會議頻道需要 View Channel、Send Messages，以及提及指定角色的權限。程式不允許 @everyone。
    隊長／幹部任務頻道另需 Read Message History、Create Public Threads、Send Messages in Threads。此處「公開討論串」只對有權查看其私人父頻道的成員可見，不會新增父頻道權限。
 4. `tasks:register` 只逐一更新本專案已啟用的指令；停用功能後重跑會移除對應舊指令。
-5. 依 [Webhook 契約與去重](docs/webhook.md) 設定 Make。收到 Accepted 不代表 Trello 成功。
+5. 升級及舊任務匯入請依 [MongoDB 任務切換](docs/mongodb-tasks.md) 操作；原 Make 設定與 Trello 憑證不再使用。
 
-私人 Discord 頻道維持原權限；Trello 看板成員仍可讀取同步內容，請確認可見範圍。Bot 不讀取會議文件，也不更改其分享權限。
+私人 Discord 頻道維持原權限；任務內容不再傳送至 Trello。Bot 不讀取會議文件，也不更改其分享權限。
 
 ## 查看與編輯會議
 
@@ -129,7 +124,7 @@ URI 可指定 replica set、認證來源與 TLS；使用團隊提供的 CA，勿
 - **不再提供資料庫程序鎖**。部署負責人須確保單副本、Recreate，且本機舊 Bot／PM 已停止。節點失聯仍可能短暫雙開，團隊已接受這項限制。
 - 所有正式狀態都存 MongoDB；不需要 runtime 持久磁碟。SIGTERM／SIGINT 排空工作，25 秒上限。
 - 指定 PORT 時提供 `/healthz`、`/readyz`；日誌寫 stdout／stderr，只用受控事件與錯誤碼。
-- Make 回應不明時保留等待確認；會議及 PM 提醒結果不明時不自動重送。
+- 任務寫入結果不明時保留等待核對；會議及 PM 提醒結果不明時不自動重送。
 - 本次不修改學長管理的 Dockerfile 或 CI/CD。原 Dockerfile 註解中的獨立 PM 指令已不適用；不應另外啟動第二個 PM 程序。
 
 ### 一次性管理指令
@@ -147,9 +142,11 @@ npm run pm -- --mode weekly
 
 ### 舊資料與切換
 
+Trello→MongoDB 升級不會自動把初始快照當成最新任務。保留原 MongoDB，先備份；使用看板 JSON 匯出或歷史 readBoard snapshot，執行 `npm run tasks:import -- private/board.json` 預覽，再加 `--apply` 套用。僅匯入目前已綁定的任務，保留原 ack、原始卡片與提醒紀錄，詳見 [切換與驗收](docs/mongodb-tasks.md)。
+
 舊電腦上的 SQLite、Bot 與自動啟動設定不會被此分支修改。PostgreSQL 專用匯入工具已移除；本階段不提供 SQLite→MongoDB 匯入，也不自動捨棄原資料。若需要保留舊同步、提醒與會議狀態，應在正式切換前另行確認搬移方式。
 
-使用空的 MongoDB 不會繼承舊去重／提醒歷史；補抓只從新環境啟用後開始，既有 Trello 任務可能再次收到當前階段的到期提醒。此分支不會替團隊執行正式切換。
+使用空的 MongoDB 不會繼承舊去重／提醒歷史；補抓只從新環境啟用後開始，不能自動恢復舊任務及提醒狀態。此分支不會替團隊執行正式切換。
 
 ## 測試
 
@@ -162,4 +159,4 @@ npm run audit:public
 
 CI 維護者可快取 `MONGOMS_DOWNLOAD_DIR`，並將 `MONGOMS_VERSION` 設成團隊版本；本次不改 workflow。production image 只安裝 production dependencies，不需要測試伺服器。
 
-團隊實際 MongoDB 的 TCP/TLS、權限、Discord、Make、Trello 與伺服器上的關閉流程仍需人工端對端驗收。
+團隊實際 MongoDB 的 TCP/TLS、權限、Discord 與伺服器上的關閉流程仍需人工端對端驗收。

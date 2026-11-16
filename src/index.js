@@ -7,7 +7,7 @@ import { PmMonitor } from './pm/monitor.js';
 import {BankMonitor} from './bank/monitor.js';
 import { serveHealth } from './health.js';
 import { createClient, createDiscordAdapter, registerEvents } from './discord.js';
-import { sendProposal } from './webhook.js';
+import {MongoTasks} from './tasks/database.js';
 import { Worker } from './worker.js';
 import { log } from './log.js';
 import { DatabaseFailure, databaseFailure } from './state/diagnostics.js';
@@ -53,7 +53,8 @@ try {
   bank=new BankMonitor({state:store.db,client,log});
   health=await serveHealth({ready:()=>!stopping&&client.isReady(),alive:()=>!stopping});
   const discord = createDiscordAdapter(client, config);
-  worker = new Worker({ store, config, discord, send: proposal => sendProposal(proposal, config), log });
+  const tasks=new MongoTasks(store.db,config);
+  worker = new Worker({store,config,discord,send:proposal=>tasks.proposal(proposal),log});
   registerEvents(client, store, config, log);
   recovery=new Recovery({store,config,scan:(since,until)=>listRecoveryThreads(client.rest,config,since,until),log});
   taskInteractions = registerTaskInteractions(client, store, config, log);

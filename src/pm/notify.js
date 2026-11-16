@@ -26,6 +26,7 @@ export async function notifyThreads(report,config,{fetchImpl=fetch,now=Date.now(
         if(!response.ok){await response.body?.cancel();results.push({card_id:task.task_id,status:'thread_unavailable'});continue;}
         channel=await response.json();
       }catch{results.push({card_id:task.task_id,status:'thread_unavailable'});continue;}
+      if(task.storage==='mongodb'&&!await store.isBoundTask(config.guildId,channel.parent_id,task.discord_thread_id,task.task_id)) {results.push({card_id:task.task_id,status:'unbound_task'});continue;}
       const boundTeam=channel.guild_id===config.guildId && channel.parent_id!==config.forumId && await isBoundTeamTask(store,config.guildId,channel.parent_id,task.discord_thread_id,task.task_id);
       if(channel.guild_id!==config.guildId || (channel.parent_id!==config.forumId&&!boundTeam) ||
         channel.type!==11 || (channel.thread_metadata?.archived&&!boundTeam) || channel.thread_metadata?.locked){results.push({card_id:task.task_id,status:'outside_forum_or_archived'});continue;}

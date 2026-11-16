@@ -3,7 +3,8 @@ import {MongoCreationStore} from '../state/creations.js';
 import {TaskCreationService,creationInput} from './create-service.js';
 import {createTaskModal,createTaskPreview,creationCheckControls,safeTaskText,taskDateControls,taskDateCursor} from './create-ui.js';
 import {isTeamTaskChannel,teamChannelIds} from './scope.js';
-import {taskConfig,trelloTasks} from './trello.js';
+import {taskConfig} from './config.js';
+import {MongoTasks} from './database.js';
 import {assigneeIds} from './owners.js';
 
 const userPermissions=[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.SendMessages,PermissionFlagsBits.SendMessagesInThreads];
@@ -18,14 +19,15 @@ const errors={
   task_date_order:'截止日期不能早於開始日期，請重新選擇。',
   create_invalid_date:'請重新選擇年、月、日。',
   create_expired:'表單已過期或不屬於你，請重新使用 /建立任務；若已確認建立，請以原操作編號核對。',
-  task_invalid_status:'看板已封存或狀態清單已變更，請重新開啟表單。',
+  task_invalid_status:'任務狀態不可使用，請重新開啟表單。',
   create_thread_uncertain:'建立討論串的結果尚未確認，請管理員依操作編號核對 Discord 與資料庫；不要重複建立。',
+  create_legacy_pending:'這是切換前的建立紀錄，請管理員核對舊資料；不會重複建立。',
   create_pending:'建立結果尚未確認，請按「核對建立結果」。若仍未找到，請管理員核對；不要重複建立。',
 };
 
-export function registerTeamTaskCreation(client,proposalStore,config,log,{policy=taskConfig(),trello,store,now=Date.now}={}) {
+export function registerTeamTaskCreation(client,proposalStore,config,log,{policy=taskConfig(),tasks,store,now=Date.now}={}) {
   if(!policy.enabled || !teamChannelIds.length)return {get running(){return false;}};
-  trello??=trelloTasks(policy);store??=new MongoCreationStore(proposalStore.db);
+  tasks??=new MongoTasks(proposalStore.db,config);store??=new MongoCreationStore(proposalStore.db);
   const canManage=member=>policy.teamChannelAccess || policy.mode==='forum' || (policy.mode==='roles' && policy.roleIds.some(id=>member.roles.cache.has(id)));
   async function authorize(row) {
     const channel=await client.channels.fetch(row.channel_id,{force:true});
@@ -43,7 +45,7 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
     }
     return channel;
   }
-  const service=new TaskCreationService({store,trello,authorize,discord:{
+  const service=new TaskCreationService({store,tasks,authorize,discord:{
     createThread:async row=>(await authorize(row)).threads.create({name:row.input.title,type:ChannelType.PublicThread,autoArchiveDuration:10080}),
     notify:async row=>{
       await authorize(row);
@@ -77,7 +79,7 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
           if(!/^\d{17,20}$/.test(check))throw new Error('create_forbidden');
           operation=check;return await i.editReply(success(await service.reconcile(check,scope(i))));
         }
-        const [board,lists]=await Promise.all([trello.board(),trello.lists()]);
+        const [board,lists]=await Promise.all([tasks.board(),tasks.lists()]);
         const open=lists.filter(l=>!l.closed&&l.idBoard===board.id);
         if(board.closed||!open.length||open.length>25)throw new Error('task_invalid_status');
         for(const [id,d] of drafts)if(d.expires<now())drafts.delete(id);
