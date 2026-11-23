@@ -37,7 +37,7 @@ export class Worker {
     let ack;
     try { ack = await this.send(JSON.parse(row.payload)); }
     catch (error) {
-      return this.retryOrFail(row, error instanceof SyncError ? error : new SyncError('make_request_failed'), row.send_attempts);
+      return this.retryOrFail(row, error instanceof SyncError ? error : new SyncError('task_storage_failed'), row.send_attempts);
     }
     await this.store.update(row, {
       status: 'succeeded', ack: JSON.stringify(ack), last_error: null, confirmed_at: this.now(),
@@ -62,25 +62,28 @@ export class Worker {
       await this.store.update(row, { notification_status: 'skipped', notification_error: 'notification_disabled' });
       return;
     }
+    // Import can replace the acknowledgment between claiming and processing this row.
+    const ifAck=row.ack;
     if (row.notification_attempts >= 3) {
-      await this.store.update(row, { notification_status: 'failed', notification_error: 'notification_retries_exhausted' });
+      await this.store.update(row, {notification_status:'failed',notification_error:'notification_retries_exhausted'}, {ifAck});
       return;
     }
-    await this.store.update(row, { notification_attempts: row.notification_attempts + 1 });
+    const updated=await this.store.update(row,{notification_attempts:row.notification_attempts+1},{ifAck});
+    if(updated===false)return;
     let result;
-    try { result = await this.discord.notify(row.thread_id, JSON.parse(row.ack)); }
+    try { result = await this.discord.notify(row.thread_id,JSON.parse(row.ack)); }
     catch {
       await this.store.update(row, {
         notification_status: row.notification_attempts >= 3 ? 'failed' : 'pending',
         notification_error: 'discord_notification_failed',
         next_attempt_at: this.now() + backoff(row.notification_attempts, this.random),
-      });
+      }, {ifAck});
       this.log('notification_failed', { thread_id: row.thread_id, code: 'discord_notification_failed' });
       return;
     }
     await this.store.update(row, {
       notification_status: result.skipped ? 'skipped' : 'sent',
       notification_message_id: result.id ?? null, notification_error: result.skipped ? result.code : null,
-    });
+    }, {ifAck});
   }
 }

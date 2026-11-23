@@ -18,19 +18,19 @@ class FakeStore {
   async get(id) {return structuredClone(this.rows.get(id));}
   async reserve(row) {if(this.rows.has(row.id))return false;this.rows.set(row.id,{...structuredClone(row),state:'thread_pending',thread_id:null,notification_state:'pending'});return true;}
   async attachThread(id,thread) {Object.assign(this.rows.get(id),{thread_id:thread,state:'card_pending'});}
-  async finish(id,card) {const row=this.rows.get(id);Object.assign(row,{state:'succeeded',card_id:card.id});this.bindings.set(row.thread_id,{guild_id:row.guild_id,forum_id:row.channel_id,status:'succeeded',ack:JSON.stringify({trello_card_id:card.id})});}
+  async finish(id,card) {const row=this.rows.get(id);Object.assign(row,{state:'succeeded',card_id:card.id});this.bindings.set(row.thread_id,{guild_id:row.guild_id,forum_id:row.channel_id,status:'succeeded',ack:JSON.stringify({task_id:card.id})});}
   async claimNotice(id) {const row=this.rows.get(id);if(row.notification_state!=='pending')return false;row.notification_state='sending';return true;}
   async noticeSent(id,message) {Object.assign(this.rows.get(id),{notification_state:'sent',notification_message_id:message});}
 }
 function fixture() {
   const store=new FakeStore(),cards=[];let posts=0,threads=0,notices=0;
-  const trello={board:async()=>({id:board,closed:false}),lists:async()=>[{id:list,idBoard:board,name:'待執行',closed:false}],
-    create:async payload=>{posts++;const card={...payload,id:cardId,idBoard:board,closed:false,shortUrl:'https://trello.com/c/example1'};cards.push(card);return structuredClone(card);},
+  const tasks={board:async()=>({id:board,closed:false}),lists:async()=>[{id:list,idBoard:board,name:'待執行',closed:false}],
+    create:async (payload,{creationId}={})=>{posts++;const card={...payload,id:cardId,idBoard:board,source:'discord',creation_id:creationId,closed:false,shortUrl:'https://discord.com/channels/'+guild+'/'+thread};cards.push(card);return structuredClone(card);},
     cardsForThread:async()=>structuredClone(cards),card:async()=>structuredClone(cards[0])};
   const discord={createThread:async()=>{threads++;return {id:thread,guildId:guild,parentId:channel,type:11};},
     notify:async row=>{notices++;assert.equal((await store.get(row.id)).state,'succeeded');return {id:actor};}};
-  const service=new TaskCreationService({store,trello,discord,authorize:async()=>{}});
-  return {store,cards,trello,discord,service,op:{id,guild,channel,actor,input:structuredClone(input)},counts:()=>({posts,threads,notices})};
+  const service=new TaskCreationService({store,tasks,discord,authorize:async()=>{}});
+  return {store,cards,tasks,discord,service,op:{id,guild,channel,actor,input:structuredClone(input)},counts:()=>({posts,threads,notices})};
 }
 
 test('creation picker has no date text input and respects Discord component limits',()=>{
@@ -67,12 +67,12 @@ test('one confirmed creation binds a thread for existing task controls and survi
   const card=f.cards[0];assert.equal(card.start,'2026-11-19T16:00:00.000Z');assert.equal(card.due,'2026-11-28T15:59:00.000Z');
   assert.deepEqual(discordOwners(card.desc),[{id:owner,name:'Owner'}]);assert.equal(discordAssigner(card.desc).id,assignee);assert.equal(taskDescription(card.desc),input.description);
   assert.ok(card.desc.includes(`https://discord.com/channels/${guild}/${thread}`));assert.equal(card.idMembers,undefined);
-  const tasks=new TaskService({proposalStore:{get:async id=>f.store.bindings.get(id)},trello:f.trello,config:{guildId:guild,forumId:'900000000000000199'}});
+  const tasks=new TaskService({proposalStore:{get:async id=>f.store.bindings.get(id)},tasks:f.tasks,config:{guildId:guild,forumId:'900000000000000199'}});
   assert.equal((await tasks.context({id:thread,guildId:guild,parentId:channel,type:11},{id:actor,canViewForum:true})).id,cardId);
 });
 
-test('lost Trello response is reconciled by readback after restart without another create',async()=>{
-  const f=fixture(),create=f.trello.create;f.trello.create=async p=>{await create(p);throw Error('task_trello_unconfirmed');};
+test('lost database response is reconciled by readback after restart without another create',async()=>{
+  const f=fixture(),create=f.tasks.create;f.tasks.create=async (...args)=>{await create(...args);throw Error('task_storage_unconfirmed');};
   await assert.rejects(f.service.create(f.op));assert.equal((await f.store.get(id)).state,'card_pending');assert.equal(f.counts().notices,0);
   const restarted=new TaskCreationService({...f.service});await restarted.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});
   assert.deepEqual(f.counts(),{posts:1,threads:1,notices:1});
@@ -80,9 +80,9 @@ test('lost Trello response is reconciled by readback after restart without anoth
 
 test('unconfirmed or conflicting cards cannot announce success or create again',async()=>{
   for(const kind of ['missing','partial','duplicates']) {
-    const f=fixture();const create=f.trello.create;
-    f.trello.create=async p=>{if(kind==='missing')throw Error('network');const card=await create(p);if(kind==='partial'){f.cards[0].idList='other';card.idList='other';}if(kind==='duplicates')f.cards.push({...card,id:'dddddddddddddddddddddddd'});throw Error('network');};
-    await assert.rejects(f.service.create(f.op));await assert.rejects(f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor}),/create_pending/);
+    const f=fixture();const create=f.tasks.create;
+    f.tasks.create=async (...args)=>{if(kind==='missing')throw Error('network');const card=await create(...args);if(kind==='partial'){f.cards[0].idList='other';card.idList='other';}if(kind==='duplicates')f.cards.push({...card,id:'dddddddddddddddddddddddd'});throw Error('network');};
+    await assert.rejects(f.service.create(f.op));await assert.rejects(f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor}),kind==='missing'?/create_pending/:/create_binding_conflict/);
     assert.equal(f.counts().notices,0);assert.equal(f.counts().threads,1);assert.ok(f.counts().posts<=1);
   }
 });
@@ -111,11 +111,11 @@ function interactionFixture(assignees=[assignee],mode='forum',teamChannelAccess=
   const parent={id:channel,guildId:guild,type:0,permissionsFor:member=>({has:()=>member?.id==='bot'?botAllowed:member.user?.id===actor?actorAllowed:targetAllowed}),
     guild:{members:{fetch:async({user})=>members.get(user)}},threads:{create:async()=>{const created=await f.discord.createThread();channels.set(thread,{...created,send:async payload=>{assert.equal((await f.store.get(id)).state,'succeeded');result.notice=payload;return {id:actor};}});return created;}}};
   const channels=new Map([[channel,parent]]),client={user:{id:'bot'},channels:{fetch:async id=>channels.get(id)},on:(event,h)=>{handler=h;}};
-  registerTeamTaskCreation(client,{}, {guildId:guild},()=>{}, {store:f.store,trello:f.trello,policy:{enabled:true,mode,roleIds:[owner],teamChannelAccess},now:()=>Date.parse('2026-10-17T12:00:00+08:00')});
+  registerTeamTaskCreation(client,{}, {guildId:guild},()=>{}, {store:f.store,tasks:f.tasks,policy:{enabled:true,mode,roleIds:[owner],teamChannelAccess},now:()=>Date.parse('2026-10-17T12:00:00+08:00')});
   const base={id,guildId:guild,channelId:channel,channel:parent,member:members.get(actor),user:members.get(actor).user,
     isChatInputCommand:()=>false,isButton:()=>false,isStringSelectMenu:()=>false,isModalSubmit:()=>false,
     deferUpdate:async()=>{},deferReply:async payload=>{result.flags=payload.flags;},editReply:async payload=>{result.reply=payload;},update:async payload=>{result.reply=payload;},reply:async payload=>{result.reply=payload;},showModal:async m=>{modal=m.toJSON();}};
-  return {...f,parent,members,get result(){return result;},get modal(){return modal;},setActor:v=>{actorAllowed=v;},setTarget:v=>{targetAllowed=v;},setBot:v=>{botAllowed=v;},
+  return {...f,parent,channels,members,get result(){return result;},get modal(){return modal;},setActor:v=>{actorAllowed=v;},setTarget:v=>{targetAllowed=v;},setBot:v=>{botAllowed=v;},
     run:async patch=>{result??={};await handler({...base,...patch});return result.reply;},
     command:()=>({commandName:'建立任務',isChatInputCommand:()=>true,options:{getString:()=>null}}),
     button:action=>({customId:'create_task:'+action+':'+id,isButton:()=>true}),select:(action,value)=>({customId:'create_task:'+action+':'+id,isStringSelectMenu:()=>true,values:[value]}),
@@ -152,13 +152,39 @@ test('each selected assignee must still be human and authorized when confirming 
   }
 });
 
-test('a legacy pending single-assignee receipt reconciles without changing its original card payload',async()=>{
+test('a successful legacy receipt can be checked or replayed with the old list ID',async()=>{
+  const f=fixture(),scope={guild_id:guild,channel_id:channel,actor_id:actor};
+  await f.store.reserve({id,...scope,input});
+  await f.store.attachThread(id,thread);
+  await f.store.finish(id,{id:cardId});
+  f.tasks.lists=async()=>assert.fail('a completed receipt needs no status lookup');
+  f.service.authorize=async (_,options)=>assert.equal(options.receiptOnly,true);
+  assert.equal((await f.service.reconcile(id,scope)).state,'succeeded');
+  assert.equal((await f.service.create(f.op)).thread_id,thread);
+  assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
+});
+
+test('Discord check returns a successful legacy receipt even if its assignee left or thread was locked',async()=>{
+  const f=interactionFixture();
+  await f.store.reserve({id,guild_id:guild,channel_id:channel,actor_id:actor,input});
+  await f.store.attachThread(id,thread);
+  await f.store.finish(id,{id:cardId});
+  f.channels.set(thread,{guildId:guild,parentId:channel,type:11,locked:true});
+  f.members.delete(assignee);
+  f.setBot(false);
+  await f.run({...f.command(),options:{getString:()=>id}});
+  assert.match(f.result.reply.content,/先前已建立/);
+  assert.ok(f.result.reply.content.includes('<#'+thread+'>'));
+  assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
+});
+
+test('a legacy pending receipt stays intact and cannot be silently recreated',async()=>{
   const f=fixture(),row={id,guild_id:guild,channel_id:channel,actor_id:actor,input:structuredClone(input),thread_id:thread,board_id:board};
   await f.store.reserve(row);await f.store.attachThread(id,thread);
-  f.cards.push({...creationPayload(row),id:cardId,idBoard:board,closed:false,shortUrl:'https://trello.com/c/example1'});
+  f.cards.push({...creationPayload(row),id:cardId,idBoard:board,closed:false,shortUrl:'https://discord.com/channels/'+guild+'/'+thread});
   assert.equal(discordAssigner(f.cards[0].desc).id,assignee);
-  await f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});
-  assert.equal((await f.store.get(id)).state,'succeeded');assert.deepEqual(f.counts(),{posts:0,threads:0,notices:1});
+  await assert.rejects(f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor}),/create_legacy_pending/);
+  assert.equal((await f.store.get(id)).state,'card_pending');assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
 });
 
 test('Discord flow selects dates, previews, creates once, and pings only selected people in the task thread',async()=>{

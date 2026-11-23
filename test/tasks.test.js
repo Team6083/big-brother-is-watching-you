@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { TaskStore, mappedDiscordOwners } from '../src/tasks/store.js';
 import { TaskService, parseDate } from '../src/tasks/service.js';
-import { trelloTasks, taskConfig } from '../src/tasks/trello.js';
+import {taskConfig} from '../src/tasks/config.js';
 import { controls, taskModal, editModal, descriptionModal, statusModal, taskView, parseDates, descriptionTemplate, taskCommands, registerTaskInteractions } from '../src/tasks/interactions.js';
 import { discordOwners,withDiscordOwners,discordAssigner } from '../src/tasks/owners.js';
 import { analyze } from '../src/pm/report.js';
@@ -19,15 +19,14 @@ function fixture(){
   const thread={id:threadId,guildId:guild,parentId:forum,type:11,archived:false,locked:false};
   const actor={id:person,bot:false,canViewForum:true,roles:[]};
   const writes=[];const comments=[];
-  const trello={board:async()=>({id:boardId,closed:false}),card:async()=>structuredClone(card),
-    members:async()=>[{id:memberId},{id:member2}],
+  const tasks={board:async()=>({id:boardId,closed:false}),card:async()=>structuredClone(card),
     update:async(id,patch)=>{writes.push(patch);Object.assign(card,patch);return structuredClone(card);},
     progress:async(id,text)=>{const action={id:actionId,data:{card:{id},text}};comments.push(action);writes.push({text});return action;},
     comments:async()=>comments};
   const config={guildId:guild,forumId:forum};const policy={mode:'forum',roleIds:[]};
   const proposalStore={get:()=>({status:'succeeded',ack:JSON.stringify({trello_card_id:cardId})})};
-  const service=new TaskService({store,proposalStore,trello,config,policy});
-  return {db,store,card,thread,actor,writes,comments,trello,service,policy,proposalStore};
+  const service=new TaskService({store,proposalStore,tasks,config,policy});
+  return {db,store,card,thread,actor,writes,comments,tasks,service,policy,proposalStore};
 }
 test('task dates use Taipei timezone, valid calendar dates and explicit clearing',()=>{
   assert.equal(parseDate('2026-10-04'),'2026-10-03T16:00:00.000Z');
@@ -67,11 +66,10 @@ test('progress is owner-only even when all forum members may manage dates',async
     assert.equal(result.action_id,actionId);assert.ok(f.writes[0].text.includes(`CMSFTC_INTERACTION_ID=${operation}`));assert.ok(f.writes[0].text.startsWith('[進度]'));
   }finally{f.db.close();}
 });
-test('member mapping is explicit, one-to-one, validated against real board members',async()=>{
+test('stored legacy owner mappings are one-to-one and resolve Discord IDs',()=>{
   const f=fixture();try{
-    await assert.rejects(f.service.mapMember(f.actor,other,memberId),/task_mapping_conflict/);
-    await assert.rejects(f.service.mapMember(f.actor,other,'a00000000000000000000009'),/task_member_not_on_board/);
-    await f.service.mapMember(f.actor,other,member2);assert.equal(f.store.member(guild,other),member2);
+    assert.throws(()=>f.store.map(guild,other,memberId),/UNIQUE/);
+    f.store.map(guild,other,member2);assert.equal(f.store.member(guild,other),member2);
     assert.deepEqual(mappedDiscordOwners(f.db,guild,[memberId,member2]),[person,other]);
   }finally{f.db.close();}
 });
@@ -93,25 +91,25 @@ test('same interaction receipt survives service restart and progress is not post
     await restarted.execute(op);assert.equal(f.writes.length,1);
   }finally{f.db.close();}
 });
-test('lost Trello reply reserves card until readback reconciles applied date',async()=>{
+test('lost storage reply reserves card until readback reconciles applied date',async()=>{
   const f=fixture();try{
-    f.trello.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw new Error('task_trello_unconfirmed');};
-    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'dates',input:{due:'2026-10-10'}}),/task_trello_unconfirmed/);
+    f.tasks.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw new Error('task_storage_unconfirmed');};
+    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'dates',input:{due:'2026-10-10'}}),/task_storage_unconfirmed/);
     await assert.rejects(f.service.execute({id:'900000000000000016',thread:f.thread,actor:f.actor,kind:'dates',input:{due:'2026-10-11'}}),/task_pending_review/);
     await f.service.reconcile(f.thread,f.actor);assert.equal(f.store.get(operation).state,'succeeded');assert.equal(f.writes.length,1);
   }finally{f.db.close();}
 });
 test('failed progress confirmation is reconciled by exact recorded comment; never posted again',async()=>{
   const f=fixture();try{
-    const original=f.trello.progress;f.trello.progress=async(id,text)=>{await original(id,text);throw new Error('task_trello_unconfirmed');};
-    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'progress',input:{text:'測試'}}),/task_trello_unconfirmed/);
+    const original=f.tasks.progress;f.tasks.progress=async(id,text)=>{await original(id,text);throw new Error('task_storage_unconfirmed');};
+    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'progress',input:{text:'測試'}}),/task_storage_unconfirmed/);
     await f.service.reconcile(f.thread,f.actor);assert.equal(f.store.get(operation).state,'succeeded');assert.equal(f.writes.length,1);
   }finally{f.db.close();}
 });
-test('definite Trello rejection allows a new operation and never reports success',async()=>{
+test('definite version conflict allows a new operation and never reports success',async()=>{
   const f=fixture();try{
-    f.trello.update=async()=>{throw new Error('task_trello_rejected');};
-    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'dates',input:{due:'2026-10-10'}}),/task_trello_rejected/);
+    f.tasks.update=async()=>{throw new Error('task_conflict');};
+    await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'dates',input:{due:'2026-10-10'}}),/task_conflict/);
     assert.equal(f.store.get(operation).state,'failed');assert.equal(f.store.pending(cardId),undefined);
   }finally{f.db.close();}
 });
@@ -120,13 +118,6 @@ test('pending card reservation across SQLite stores prevents concurrent mutation
     f.store.begin(operation,cardId,person,'dates',{due:null});const otherStore=new TaskStore(f.db);
     assert.throws(()=>otherStore.begin('900000000000000016',cardId,person,'dates',{due:null}));assert.equal(otherStore.pending(cardId).interaction_id,operation);
   }finally{f.db.close();}
-});
-test('Trello adapter uses separate write header, only bounded intended methods and no write retry',async()=>{
-  let count=0;
-  const api=trelloTasks({boardId:'testbrd1',key:'fixtureKey',token:'fixtureWriteToken'},{fetchImpl:async(url,options)=>{
-    count++;assert.ok(!url.href.includes('fixtureWriteToken'));assert.ok(options.headers.Authorization.includes('fixtureWriteToken'));assert.equal(options.method,'PUT');return new Response('',{status:503});
-  }});
-  await assert.rejects(api.update(cardId,{due:null}),/task_trello_unconfirmed/);assert.equal(count,1);
 });
 test('UI uses current label modals, bounded owner select and valid guild command schemas',()=>{
   assert.equal(taskModal('dates').toJSON().components.length,2);assert.throws(()=>taskModal('progress'),/task_progress_retired/);
@@ -146,7 +137,7 @@ test('interaction handler refuses arbitrary forums before opening forms or writi
   Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
   const f=fixture();let handler;let reply;
   try{
-    registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>null},{guildId:guild,forumId:forum},()=>{});
+    registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>null},{guildId:guild,forumId:forum},()=>{},{tasks:f.tasks});
     await handler({isChatInputCommand:()=>true,isAutocomplete:()=>false,commandName:'任務',channel:{guildId:guild,parentId:'other',type:11},user:{bot:false},reply:async r=>{reply=r;}});
     assert.ok(reply.content.includes('指定 Mentor'));assert.equal(reply.flags,64);
   }finally{
@@ -156,8 +147,8 @@ test('interaction handler refuses arbitrary forums before opening forms or writi
 
 test('Discord owner assignment survives lost response and is reconciled without a second write',async()=>{
  const f=fixture();try{
-  f.trello.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_trello_unconfirmed');};
-  await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'owners',input:{ids:[other]}}),/task_trello_unconfirmed/);
+  f.tasks.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_storage_unconfirmed');};
+  await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'owners',input:{ids:[other]}}),/task_storage_unconfirmed/);
   await f.service.reconcile(f.thread,f.actor);assert.equal(f.store.get(operation).state,'succeeded');assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
@@ -175,7 +166,7 @@ test('PM treats Discord-only assignment as owned and keeps IDs for mentions',()=
 
 function fullEdit(f){
  const list='a0000000000000000000000a';f.card.idList=list;
- const lists=[{id:list,idBoard:boardId,name:'進行中',closed:false}];f.trello.lists=async()=>lists;
+ const lists=[{id:list,idBoard:boardId,name:'進行中',closed:false}];f.tasks.lists=async()=>lists;
  return {id:operation,thread:f.thread,actor:f.actor,kind:'edit',input:{ids:[other],assigner:person,names:{[person]:'指派者',[other]:'執行者'},start:'2026-10-04',due:'2026-10-10',description:'工作內容與完成標準',status:list}};
 }
 test('combined form saves owner, assigner, dates and status in one confirmed card update',async()=>{
@@ -195,7 +186,7 @@ test('multiple assignees remain visible and selected when reopening task setting
   const op=fullEdit(f);op.input.assigner=[person,other];await f.service.execute(op);
   const people=[{id:person,name:'指派者'},{id:other,name:'執行者'}];
   assert.deepEqual(discordAssigner(f.card.desc),people);
-  const lists=await f.trello.lists(),view=taskView(f.card,lists),modal=editModal(f.card,lists,person,operation).toJSON();
+  const lists=await f.tasks.lists(),view=taskView(f.card,lists),modal=editModal(f.card,lists,person,operation).toJSON();
   assert.match(view.fields[1].value,/指派者/);assert.match(view.fields[1].value,/執行者/);
   assert.equal(modal.components[1].component.max_values,5);
   assert.deepEqual(modal.components[1].component.default_values.map(p=>p.id),[person,other]);
@@ -209,8 +200,8 @@ test('combined form rejects invalid dates or foreign, archived and missing statu
  for(const variant of ['date','order','foreign','closed','missing']) {
   const f=fixture();try{const op=fullEdit(f);
    if(variant==='date')op.input.start='2026-02-30';if(variant==='order')op.input.due='2026-10-01';
-   if(variant==='foreign')f.trello.lists=async()=>[{id:op.input.status,idBoard:'other',closed:false}];
-   if(variant==='closed')f.trello.lists=async()=>[{id:op.input.status,idBoard:boardId,closed:true}];
+   if(variant==='foreign')f.tasks.lists=async()=>[{id:op.input.status,idBoard:'other',closed:false}];
+   if(variant==='closed')f.tasks.lists=async()=>[{id:op.input.status,idBoard:boardId,closed:true}];
    if(variant==='missing')op.input.status='missing';
    await assert.rejects(f.service.execute(op));assert.equal(f.writes.length,0);assert.equal(f.store.pending(cardId),undefined);
   }finally{f.db.close();}
@@ -218,23 +209,23 @@ test('combined form rejects invalid dates or foreign, archived and missing statu
 });
 test('combined update lost reply is reconciled across service restart without sending again',async()=>{
  const f=fixture();try{const op=fullEdit(f);
-  f.trello.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_trello_unconfirmed');};
-  await assert.rejects(f.service.execute(op),/task_trello_unconfirmed/);
+  f.tasks.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_storage_unconfirmed');};
+  await assert.rejects(f.service.execute(op),/task_storage_unconfirmed/);
   const restarted=new TaskService({...f.service,store:new TaskStore(f.db)});await restarted.reconcile(f.thread,f.actor);
   assert.equal(f.store.get(operation).state,'succeeded');assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
 test('combined update cannot claim success after partial or mismatched acknowledgment',async()=>{
  const f=fixture();try{const op=fullEdit(f);
-  f.trello.update=async(id,patch)=>{f.writes.push(patch);f.card.desc=patch.desc;return structuredClone(f.card);};
-  await assert.rejects(f.service.execute(op),/task_trello_unconfirmed/);
+  f.tasks.update=async(id,patch)=>{f.writes.push(patch);f.card.desc=patch.desc;return structuredClone(f.card);};
+  await assert.rejects(f.service.execute(op),/task_storage_unconfirmed/);
   await assert.rejects(f.service.reconcile(f.thread,f.actor),/task_pending_review/);
   assert.equal(f.store.get(operation).state,'pending');assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
 test('combined editor refreshes description after reservation and preserves intervening changes',async()=>{
  const f=fixture();try{const op=fullEdit(f);let reads=0;
-  f.trello.card=async()=>{if(++reads===2)f.card.desc='最新內容\nCMSFTC_THREAD_ID='+threadId;return structuredClone(f.card);};
+  f.tasks.card=async()=>{if(++reads===2)f.card.desc='最新內容\nCMSFTC_THREAD_ID='+threadId;return structuredClone(f.card);};
   await f.service.execute(op);assert.ok(f.card.desc.startsWith('最新內容\n'));assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
@@ -252,16 +243,11 @@ test('unified Discord modal has five labeled fields, two user pickers, prefilled
 
 for(const assignees of [[person],[person,other]])test('command submits '+assignees.length+' assignees before targeted owner notification',async()=>{
  const saved={...process.env},priorFetch=globalThis.fetch,f=fixture();const op=fullEdit(f);let handler,panel,modal,confirmation,puts=0;
+ const originalUpdate=f.tasks.update;f.tasks.update=async(...args)=>{puts++;return originalUpdate(...args);};
  Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
- globalThis.fetch=async(url,options)=>{
-  const path=new URL(url).pathname;
-  if(options.method==='PUT'){puts++;Object.assign(f.card,JSON.parse(options.body));return Response.json(f.card);}
-  if(path.endsWith('/lists'))return Response.json(await f.trello.lists());
-  if(path.includes('/cards/'))return Response.json(f.card);
-  return Response.json({id:boardId,closed:false});
- };
+ globalThis.fetch=()=>assert.fail('task handler must not use HTTP');
  try{
-  registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:f.proposalStore.get},{guildId:guild,forumId:forum},()=>{});
+  registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:f.proposalStore.get},{guildId:guild,forumId:forum},()=>{},{tasks:f.tasks});
   const channel={...f.thread,permissionsFor:()=>({has:()=>true}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user===person?'指派者':'執行者'})}}};
   const base={channel,user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},isAutocomplete:()=>false,isUserSelectMenu:()=>false};
   await handler({...base,id:operation,commandName:'任務',isChatInputCommand:()=>true,isButton:()=>false,deferReply:async()=>{},editReply:async p=>{panel=p;}});
@@ -272,7 +258,7 @@ for(const assignees of [[person],[person,other]])test('command submits '+assigne
   await handler({...base,id:'900000000000000019',customId:modal.custom_id,isChatInputCommand:()=>false,isButton:()=>false,isModalSubmit:()=>true,
    fields:{getField:key=>({values:key==='owners'?[other]:assignees}),getTextInputValue:key=>key==='dates'?'開始：'+op.input.start+'\n截止：'+op.input.due:op.input.description,getStringSelectValues:()=>[op.input.status]},
    deferReply:async()=>{},editReply:async p=>{confirmation=p;}});
-  assert.equal(puts,1);assert.equal(confirmation.content,'✅ 任務人員、日期、狀態與描述已更新至 Trello。\nOwner：<@'+other+'>｜Assignee：'+assignees.map(id=>id===person?'指派者':'執行者').join('、'));assert.deepEqual(confirmation.allowedMentions.users,[other]);
+  assert.equal(puts,1);assert.equal(confirmation.content,'✅ 任務人員、日期、狀態與描述已儲存。\nOwner：<@'+other+'>｜Assignee：'+assignees.map(id=>id===person?'指派者':'執行者').join('、'));assert.deepEqual(confirmation.allowedMentions.users,[other]);
   let viewed,privateFlag;
   await handler({...base,customId:'task:view',isChatInputCommand:()=>false,isButton:()=>true,
    deferReply:async p=>{privateFlag=p.flags;},editReply:async p=>{viewed=p;}});
@@ -310,21 +296,21 @@ test('description permission follows forum management policy and rechecks curren
  const f=fixture();try{f.policy.mode='roles';f.policy.roleIds=[other];
  const op={id:operation,thread:f.thread,actor:f.actor,kind:'description',input:{text:'新描述'}};
  await assert.rejects(f.service.execute(op),/task_forbidden/);f.policy.mode='forum';let reads=0;
- f.trello.card=async()=>{if(++reads===2)f.card.desc='修改後原文\nCMSFTC_THREAD_ID='+threadId;return structuredClone(f.card);};
+ f.tasks.card=async()=>{if(++reads===2)f.card.desc='修改後原文\nCMSFTC_THREAD_ID='+threadId;return structuredClone(f.card);};
  await f.service.execute(op);assert.ok(f.card.desc.startsWith('修改後原文\n'));
  }finally{f.db.close();}
 });
 test('description lost response survives restart and reconciles without duplicating update',async()=>{
  const f=fixture();try{const op={id:operation,thread:f.thread,actor:f.actor,kind:'description',input:{text:'測試描述'}};
- f.trello.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_trello_unconfirmed');};
- await assert.rejects(f.service.execute(op),/task_trello_unconfirmed/);
+ f.tasks.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_storage_unconfirmed');};
+ await assert.rejects(f.service.execute(op),/task_storage_unconfirmed/);
  const restarted=new TaskService({...f.service,store:new TaskStore(f.db)});await restarted.reconcile(f.thread,f.actor);await restarted.execute(op);
  assert.equal(f.writes.length,1);assert.equal(f.store.get(operation).state,'succeeded');
  }finally{f.db.close();}
 });
 test('description cannot report success without exact card acknowledgment',async()=>{
- const f=fixture();try{f.trello.update=async()=>structuredClone(f.card);
- await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'description',input:{text:'測試描述'}}),/task_trello_unconfirmed/);
+ const f=fixture();try{f.tasks.update=async()=>structuredClone(f.card);
+ await assert.rejects(f.service.execute({id:operation,thread:f.thread,actor:f.actor,kind:'description',input:{text:'測試描述'}}),/task_storage_unconfirmed/);
  assert.equal(f.store.get(operation).state,'pending');await assert.rejects(f.service.reconcile(f.thread,f.actor),/task_pending_review/);
  }finally{f.db.close();}
 });
@@ -351,8 +337,8 @@ test('status-only update changes one field without requiring owners, dates or pr
 test('invalid status-only selection cannot write and ambiguous status update is reconciled safely',async()=>{
  const f=fixture();try{const edit=fullEdit(f);const op={...edit,kind:'status',input:{status:edit.input.status}};
  await assert.rejects(f.service.execute({...op,input:{status:'unknown'}}),/task_invalid_status/);assert.equal(f.writes.length,0);
- f.trello.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_trello_unconfirmed');};
- await assert.rejects(f.service.execute(op),/task_trello_unconfirmed/);await f.service.reconcile(f.thread,f.actor);assert.equal(f.writes.length,1);
+ f.tasks.update=async(id,patch)=>{f.writes.push(patch);Object.assign(f.card,patch);throw Error('task_storage_unconfirmed');};
+ await assert.rejects(f.service.execute(op),/task_storage_unconfirmed/);await f.service.reconcile(f.thread,f.actor);assert.equal(f.writes.length,1);
  }finally{f.db.close();}
 });
 test('status modal is a single existing-list selector and task panel no longer offers progress input',()=>{
@@ -361,20 +347,20 @@ test('status modal is a single existing-list selector and task panel no longer o
  const buttons=controls(operation)[0].toJSON().components;assert.ok(buttons.some(c=>c.label==='更新狀態'));assert.ok(!buttons.some(c=>c.label==='更新進度'));
  }finally{f.db.close();}
 });
-test('retired progress buttons direct users to status updates without accessing Trello',async()=>{
+test('retired progress buttons direct users to status updates without accessing task storage',async()=>{
  const saved={...process.env},f=fixture();let handler,reply;
  Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
- try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{});
+ try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{},{tasks:f.tasks});
  await handler({customId:'task:progress',isChatInputCommand:()=>false,isButton:()=>true,isAutocomplete:()=>false,
  channel:{...f.thread,permissionsFor:()=>({has:()=>true})},user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},reply:async p=>{reply=p;}});
  assert.ok(reply.content.includes('更新狀態'));assert.equal(f.writes.length,0);
  }finally{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);f.db.close();}
 });
 
-test('task command in allowed captain or cadre text channels explains how to create a task without reading Trello',async()=>{
+test('task command in allowed captain or cadre text channels explains how to create a task without reading task storage',async()=>{
  const saved={...process.env},f=fixture();let handler,reply;
  Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'forum',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
- try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{});
+ try{registerTaskInteractions({on:(event,h)=>{handler=h;}},{db:f.db,get:()=>{throw Error('must not read proposal');}},{guildId:guild,forumId:forum},()=>{},{tasks:f.tasks});
  for(const id of process.env.TASK_ALLOWED_CHANNEL_IDS.split(',')) {
   await handler({commandName:'任務',isChatInputCommand:()=>true,isAutocomplete:()=>false,
    channel:{id,guildId:guild,type:0,permissionsFor:()=>({has:()=>true})},user:{id:person,bot:false},reply:async p=>{reply=p;}});
@@ -407,15 +393,10 @@ for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team
  Object.assign(process.env,{TASK_CONTROLS_ENABLED:'true',TASK_MANAGEMENT_MODE:'roles',TASK_MANAGER_ROLE_IDS:other,TEAM_CHANNEL_ACCESS_ENABLED:'true',TRELLO_BOARD_ID:'testbrd1',TRELLO_API_KEY:'testKey',TRELLO_WRITE_TOKEN:'testToken'});
  const parent={id:parentId,guildId:guild,type:0,permissionsFor:()=>({has:()=>parentAllowed})};
  const channel={...f.thread,parentId,permissionsFor:()=>({has:()=>threadAllowed}),guild:{members:{fetch:async({user})=>({user:{id:user,bot:false},displayName:user})}}};
- globalThis.fetch=async(url,options)=>{
-  if(options.method==='PUT'){f.writes.push(JSON.parse(options.body));Object.assign(f.card,JSON.parse(options.body));return Response.json(f.card);}
-  if(new URL(url).pathname.endsWith('/lists'))return Response.json(await f.trello.lists());
-  if(new URL(url).pathname.includes('/cards/'))return Response.json(f.card);
-  return Response.json({id:boardId,closed:false});
- };
+ globalThis.fetch=()=>assert.fail('task handler must not use HTTP');
  try {
   registerTaskInteractions({on:(event,h)=>{handler=h;},channels:{fetch:async()=>channel}},
-   {db:f.db,get:()=>({...f.proposalStore.get(),guild_id:guild,forum_id:parentId})},{guildId:guild,forumId:forum},()=>{});
+   {db:f.db,get:()=>({...f.proposalStore.get(),guild_id:guild,forum_id:parentId})},{guildId:guild,forumId:forum},()=>{},{tasks:f.tasks});
   const base={channel:parent,user:{id:person,bot:false},member:{roles:{cache:{map:()=>[]}}},isAutocomplete:()=>false,isUserSelectMenu:()=>false,isModalSubmit:()=>false,isButton:()=>false,isChatInputCommand:()=>false,
    reply:async p=>{reply=p;},deferReply:async()=>{},editReply:async p=>{reply=p;}};
   const open=async value=>handler({...base,id:operation,commandName:'任務',isChatInputCommand:()=>true,options:{getString:()=>value},editReply:async p=>{panel=p;}});
@@ -427,7 +408,7 @@ for(const parentId of process.env.TASK_ALLOWED_CHANNEL_IDS.split(','))test('team
   await button('edit');assert.equal(modal.title,'任務設定');
   await button('status');assert.equal(modal.title,'更新任務狀態');
   const submit=()=>handler({...base,id:'900000000000000019',customId:modal.custom_id,isModalSubmit:()=>true,fields:{getStringSelectValues:()=>[f.card.idList]}});
-  await submit();assert.match(reply.content,/已更新至 Trello/);assert.equal(f.writes.length,1);
+  await submit();assert.match(reply.content,/已儲存/);assert.equal(f.writes.length,1);
   await button('reconcile');assert.match(reply.content,/沒有待核對/);
   parentAllowed=false;await submit();assert.match(reply.content,/授權成員/);
   parentAllowed=true;threadAllowed=false;await submit();assert.match(reply.content,/授權成員/);

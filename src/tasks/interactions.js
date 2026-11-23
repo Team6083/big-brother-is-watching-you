@@ -6,7 +6,8 @@ import { discordOwners, discordAssigner, assigneeIds } from './owners.js';
 import { taskDescription } from './description.js';
 import {MongoTaskStore} from '../state/tasks.js';
 import { TaskStore } from './store.js';
-import { taskConfig, trelloTasks } from './trello.js';
+import {taskConfig} from './config.js';
+import {MongoTasks} from './database.js';
 import { TaskService } from './service.js';
 import { isTaskThread, isTeamTaskChannel, teamChannelIds, taskThreadId } from './scope.js';
 import {createTaskCommand} from './create-ui.js';
@@ -61,7 +62,7 @@ export function editModal(card,lists,actorId,draftId) {
     new LabelBuilder().setLabel('Owner（任務負責人）').setDescription('選擇實際執行任務的人；最多 5 位').setUserSelectMenuComponent(ownerSelect),
     new LabelBuilder().setLabel('Assignee（被指派的人）').setDescription('選擇被指派執行任務的人；最多 5 位').setUserSelectMenuComponent(assigner),
     new LabelBuilder().setLabel('開始／截止日期').setDescription('兩行 YYYY-MM-DD；留空保留；- 清除；Asia/Taipei').setTextInputComponent(dates),
-    new LabelBuilder().setLabel('狀態').setDescription('選擇後會移動 Trello 卡片至對應清單').setStringSelectMenuComponent(status),
+    new LabelBuilder().setLabel('狀態').setDescription('選擇任務目前的執行狀態').setStringSelectMenuComponent(status),
     new LabelBuilder().setLabel('任務描述').setDescription('填工作內容、完成標準與參考資料；清空提交可清除').setTextInputComponent(description),
   );
   return modal;
@@ -107,14 +108,16 @@ const errors = {
   task_forbidden:'任務設定與狀態更新限可查看此論壇的授權成員。',
   task_progress_retired:'目前流程只需更新狀態，不再填寫進度；請重新輸入 /任務，按「更新狀態」。',
   task_outside_forum:'請在指定 Mentor 提案論壇或 Bot 建立的隊長／幹部任務討論串內操作。',
-  task_not_synced:'此文章尚未完成 Trello 同步，請先等候成功通知。',
-  task_card_mismatch:'卡片已封存或來源不符，請核對原始 Trello 卡片。',
+  task_legacy_unavailable:'這是尚未匯入的舊任務，請管理員匯入舊資料；原紀錄仍保留。',
+  task_not_synced:'此文章尚未收錄為任務，請先等候成功通知。',
+  task_card_mismatch:'任務已封存或來源不符，請核對原討論串。',
   task_invalid_date:'日期請填有效的 YYYY-MM-DD；留空不更改，填 - 清除。',
   task_invalid_date_format:'日期請分兩行：開始：YYYY-MM-DD、截止：YYYY-MM-DD；留空保留，填 - 清除。',
   task_date_order:'截止日期不能早於開始日期。', task_empty_update:'請至少填寫一項要更改的日期。',
   task_pending_review:'已有更新未能確認，請先按「核對未確認更新」；核對前不重複送出。',
-  task_trello_unconfirmed:'尚未確認 Trello 已更新。請先按「核對未確認更新」，不要反覆提交。',
-  task_trello_rejected:'Trello 拒絕此操作，請檢查寫入授權與卡片權限。',
+  task_storage_failed:'此次更新未儲存，請重新開啟 /任務 再試。',
+  task_storage_unconfirmed:'尚未確認任務已儲存。請先按「核對未確認更新」，不要反覆提交。',
+  task_conflict:'任務已被其他操作變更，請重新開啟 /任務 後再試。',
   task_nothing_to_reconcile:'目前沒有待核對的更新。',
   task_invalid_status:'狀態清單已變更或不可使用，請重新輸入 /任務。',
   task_invalid_assigner:'請選擇 1–5 位可查看論壇的人類成員作為被指派的人。',
@@ -123,7 +126,7 @@ const errors = {
   task_thread_option_mismatch:'請省略「討論串」選項，或填入目前討論串的連結或 ID；若要操作其他任務，請回到其父頻道使用 /任務。',
   task_form_expired:'表單已過期或 Bot 已重新啟動，請重新輸入 /任務。',
   task_invalid_description:'描述最多 4000 字，請勿使用系統保留的 CMSFTC 標記。',
-  task_invalid_description_block:'任務描述格式異常，請管理員核對 Trello 卡片。',
+  task_invalid_description_block:'任務描述格式異常，請管理員核對資料。',
 };
 const safe=text=>String(text || '').replace(/@/g,'＠').replace(/[<>`]/g,' ').slice(0,1800);
 
@@ -131,22 +134,22 @@ export function taskView(card,lists) {
   const names=people=>people?.length?people.map(p=>safe(p.name)+'（<@'+p.id+'>）').join('\n'):'尚未設定';
   const assigner=discordAssigner(card.desc);
   const date=value=>value?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',dateStyle:'short',timeStyle:'short'}).format(new Date(value)):'尚未設定';
-  return {title:safe(card.name).slice(0,256),description:(taskDescription(card.desc)||'尚未填寫任務描述').replace(/@/g,'＠'),
+  return {title:safe(card.name).slice(0,256),description:(taskDescription(card.desc)||card.proposal?.content?.slice(0,4000)||'尚未填寫任務描述').replace(/@/g,'＠'),
     fields:[
       {name:'Owner（任務負責人）',value:names(discordOwners(card.desc))},
       {name:'Assignee（被指派的人）',value:names([].concat(assigner||[]))},
       {name:'開始日期',value:date(card.start),inline:true},
       {name:'截止日期',value:date(card.due),inline:true},
       {name:'狀態',value:safe(lists.find(l=>l.id===card.idList)?.name || '尚未取得狀態'),inline:true},
-    ],footer:{text:'最新資料來自 Trello；日期為 Asia/Taipei。查看不會通知其他人。'}};
+    ],footer:{text:'日期為 Asia/Taipei。查看不會通知其他人。'}};
 }
 
-export function registerTaskInteractions(client,proposalStore,config,log) {
-  const policy=taskConfig();
+export function registerTaskInteractions(client,proposalStore,config,log,{tasks,store,policy=taskConfig()}={}) {
   if(!policy.enabled)return;
   if(!policy.mode)throw new Error('task_missing_management_policy');
-  const trello=trelloTasks(policy), store=proposalStore.db.mongo?new MongoTaskStore(proposalStore.db):new TaskStore(proposalStore.db);
-  const service=new TaskService({store,proposalStore,trello,config,policy});
+  tasks??=new MongoTasks(proposalStore.db,config);
+  store??=proposalStore.db.mongo?new MongoTaskStore(proposalStore.db):new TaskStore(proposalStore.db);
+  const service=new TaskService({store,proposalStore,tasks,config,policy});
   let active=0;
   const drafts=new Map();
   const draftFor=(id,i)=>{const d=drafts.get(id);if(!d || d.actor!==i.user.id || d.channel!==i.channel.id || d.expires<Date.now())throw new Error('task_form_expired');return d;};
@@ -194,12 +197,12 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
       }
       if(i.isButton() && i.customId==='task:owners') {
         if(!service.canManage(actor))throw new Error('task_forbidden');
-        return await i.reply({flags:MessageFlags.Ephemeral,content:'選擇 1–5 位負責人。選擇後即取代此任務目前的全部 Discord 負責人，並在此文章 @他們。直接選擇 Discord 成員，不需要 Trello 帳號。',
+        return await i.reply({flags:MessageFlags.Ephemeral,content:'選擇 1–5 位負責人。選擇後即取代此任務目前的全部 Discord 負責人，並在此文章 @他們。直接選擇 Discord 成員。',
           components:[new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId('task:submit:owners').setMinValues(1).setMaxValues(5).setPlaceholder('選擇此任務的負責人'))]});
       }
       if(i.isChatInputCommand()) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
-        const [card,lists]=await Promise.all([service.context(channel,actor),trello.lists()]);
+        const [card,lists]=await Promise.all([service.context(channel,actor),tasks.lists()]);
         for(const [id,d] of drafts)if(d.expires<Date.now())drafts.delete(id);
         if(drafts.size>=100)drafts.delete(drafts.keys().next().value);
         drafts.set(i.id,{actor:actor.id,channel:i.channel.id,thread:channel.id,card,lists,expires:Date.now()+15*60*1000});
@@ -208,14 +211,14 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
       }
       if(i.isButton() && ['view','view_thread'].includes(action)) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
-        const [card,lists]=await Promise.all([service.context(channel,actor),trello.lists()]);
+        const [card,lists]=await Promise.all([service.context(channel,actor),tasks.lists()]);
         return await i.editReply({embeds:[taskView(card,lists)],allowedMentions:{parse:[]}});
       }
       const kind=i.customId?.split(':')[2];
       if(i.isButton() && ['reconcile','reconcile_thread'].includes(action)) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
         await service.reconcile(channel,actor);
-        return await i.editReply({content:'✅ 已從 Trello 核對先前更新。',allowedMentions:{parse:[]}});
+        return await i.editReply({content:'✅ 已核對先前更新。',allowedMentions:{parse:[]}});
       }
       if(!['dates','owners','edit','description','status'].includes(kind))throw new Error('task_invalid_action');
       await i.deferReply();
@@ -250,7 +253,7 @@ export function registerTaskInteractions(client,proposalStore,config,log) {
       await service.execute({id:i.id,thread:channel,actor,kind,input});
       const mentions=['owners','edit'].includes(kind)?input.ids:[];
       const detail=kind==='edit'?'Owner：'+mentions.map(id=>'<@'+id+'>').join(' ')+'｜Assignee：'+input.assigner.map(id=>safe(input.names[id])).join('、'):kind==='owners'?mentions.map(id=>`<@${id}>`).join(' '):kind==='progress'?safe(input.text):'';
-      await i.editReply({content:`✅ ${kind==='status'?'任務狀態':kind==='description'?'任務描述':kind==='edit'?'任務人員、日期、狀態與描述':kind==='dates'?'開始／截止日期':kind==='owners'?'任務負責人':'進度'}已更新至 Trello。${detail?'\n'+detail:''}`,
+      await i.editReply({content:`✅ ${kind==='status'?'任務狀態':kind==='description'?'任務描述':kind==='edit'?'任務人員、日期、狀態與描述':kind==='dates'?'開始／截止日期':kind==='owners'?'任務負責人':'進度'}已儲存。${detail?'\n'+detail:''}`,
         allowedMentions:{parse:[],users:mentions,repliedUser:false}});
       log('task_updated',{thread_id:channel.id,code:kind});
     } catch(error) {

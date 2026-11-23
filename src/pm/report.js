@@ -1,6 +1,6 @@
 import { discordOwners, discordAssigner } from '../tasks/owners.js';
 const DAY = 86400000;
-const stages = new Map([
+export const stages = new Map([
   ['想法', 'idea'], ['想法收集', 'idea'], ['待討論', 'decision'], ['待討論／決策', 'decision'],
   ['待辦事項', 'todo'], ['待執行', 'todo'], ['進行中', 'doing'], ['執行中', 'doing'],
   ['待審核', 'review'], ['待公告', 'announcement'], ['完成', 'done'], ['已完成', 'done'],
@@ -52,7 +52,7 @@ export function analyze(snapshot, { now = Date.now(), ignoredMembers = [], trust
       start_date: c.start || null, due_date: c.due || null, created_at: created, updated_at: c.dateLastActivity || null,
       last_progress_update: progress, discord_thread_id: threadId,
       discord_url: /https:\/\/discord\.com\/channels\/\d+\/\d+/.exec(c.desc || '')?.[0] || null,
-      trello_card_id: c.id, trello_url: cardUrl(c.shortUrl), priority: null,
+      ...(snapshot.source==='mongodb'?{storage:'mongodb',task_url:c.shortUrl}:{trello_card_id:c.id,trello_url:cardUrl(c.shortUrl)}),priority:null,
       needs_help: labels.includes('需要協助'), review_status: stage === 'review' ? 'pending' : null,
       announcement_status: stage === 'announcement' ? 'pending' : null,
       completed_at: stage === 'done' ? completed : null, active, deadline_phase: deadlinePhase, warnings,

@@ -11,6 +11,6 @@ export class MongoDeliveryStore {
   owners(guild,ids) {return new MongoTaskStore(this.db).owners(guild,ids);}
   async isBoundTask(guild,parent,thread,card) {
     const row=await this.db.collection('proposals').findOne({_id:thread,guild_id:guild,forum_id:parent,status:'succeeded'});
-    try {return JSON.parse(row?.ack).trello_card_id===card;}catch{return false;}
+    try {return (JSON.parse(row?.ack).task_id||JSON.parse(row?.ack).trello_card_id)===card;}catch{return false;}
   }
 }

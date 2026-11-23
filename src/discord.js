@@ -50,20 +50,19 @@ export function createDiscordAdapter(client, config) {
       return buildProposal(channel, await channel.fetchStarterMessage(), parent);
     },
     async notify(id, ack) {
+      if(!ack.task_id)return {skipped:true,code:'legacy_task_not_imported'};
       const channel = await thread(id);
       const permissions = channel.permissionsFor(client.user);
       if (!permissions?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory,
         PermissionFlagsBits.SendMessagesInThreads]) || channel.archived || channel.locked) {
         return { skipped: true, code: 'notification_permission_or_archived' };
       }
-      const content = '✅ 此提案已收錄至 Trello。';
+      const content = '✅ 此提案已收錄為任務，可使用 /任務 查看與設定。';
       // Recover a recently sent confirmation if the process stopped before recording it.
       const recent = await channel.messages.fetch({ limit: 100 });
       const existing = recent.find(m => {
         if(m.author.id!==client.user.id)return false;
-        const lines=m.content.split('\n');
-        return /^✅ 此提案已收錄至 (?:[^\n]{1,40} )?Trello。$/.test(lines[0]) &&
-          (lines.length===1 || lines.length===2&&lines[1]===ack.trello_card_url);
+        return m.content===content;
       });
       if (existing) return { id: existing.id };
       const message = await channel.send({ content, allowedMentions: { parse: [] }, nonce: id, enforceNonce: true });

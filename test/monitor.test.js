@@ -21,5 +21,5 @@ test('disabled PM performs no requests; failures are sanitized and allow the nex
   const logs=[];const disabled=new PmMonitor({state:{},env:{PM_ENABLED:'false'},read:()=>assert.fail('disabled'),log:()=>{}});await disabled.tick();
   const monitor=new PmMonitor({state:{},env,read:async()=>{throw new Error('sensitive-token-url');},log:(...args)=>logs.push(args)});
   await monitor.tick();assert.equal(monitor.running,false);assert.equal(JSON.stringify(logs).includes('sensitive'),false);await monitor.tick();assert.equal(logs.length,2);
-  assert.throws(()=>new PmMonitor({env:{PM_ENABLED:'true'}}),/missing_read_config/);
+  assert.doesNotThrow(()=>new PmMonitor({env:{PM_ENABLED:'true'}}));
 });

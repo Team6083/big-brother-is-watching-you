@@ -29,14 +29,14 @@ export function buildProposal(thread, starter, forum) {
   };
 }
 
-// A proposal is not yet an assigned task. This snapshot is not a Trello state cache.
+// Initial metadata only; current task state is stored in the tasks collection.
 export function initialTask(proposal, ack) {
   return {
-    task_id: `discord:${proposal.thread_id}`, title: proposal.title, category: proposal.tags,
+    task_id: ack.task_id || `discord:${proposal.thread_id}`, title: proposal.title, category: proposal.tags,
     status: '想法收集', owner: [], start_date: null, due_date: null, created_at: proposal.created_at,
     updated_at: null, last_progress_update: null,
     discord_thread_id: proposal.thread_id, discord_url: proposal.discord_url,
-    trello_card_id: ack.trello_card_id, trello_url: ack.trello_card_url,
+    ...(ack.task_id?{task_url:ack.task_url}:{trello_card_id:ack.trello_card_id,trello_url:ack.trello_card_url}),
     priority: null, needs_help: null, review_status: null, announcement_status: null,
   };
 }
