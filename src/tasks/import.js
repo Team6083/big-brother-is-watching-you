@@ -1,10 +1,9 @@
 import {readFile} from 'node:fs/promises';
 import {openDatabase} from '../state/database.js';
-import {statuses} from './database.js';
+import {stages} from '../pm/report.js';
 import {discordOwners,discordAssigner,withDiscordOwners} from './owners.js';
 import {taskDescription} from './description.js';
 
-const aliases=new Map([['想法','idea'],['待討論','decision'],['待辦事項','todo'],['執行中','doing'],['已完成','done'],...statuses.map(([id,name])=>[name,id])]);
 const validId=id=>/^[a-f0-9]{24}$/i.test(id||'');
 const validDate=value=>value==null||typeof value==='string'&&Number.isFinite(Date.parse(value));
 
@@ -14,6 +13,19 @@ export async function importTasks(db,snapshot,config,{apply=false}={}) {
   if(!Array.isArray(snapshot?.cards)||!Array.isArray(snapshot.lists))throw new Error('task_import_invalid_export');
   const results={},count=reason=>{results[reason]=(results[reason]||0)+1;};
   const allowed=new Set([config.forumId,...(config.channelIds||[])]);
+  const listNames=new Map(snapshot.lists.map(list=>[list.id,list.name]));
+  const completions=new Map();
+  for(const action of Array.isArray(snapshot.actions)?snapshot.actions:[]) {
+    const {card,listBefore,listAfter}=action?.data||{};
+    if(action?.type!=='updateCard'||!card?.id||!listBefore||!listAfter)continue;
+    const before=listBefore.name||listNames.get(listBefore.id),after=listAfter.name||listNames.get(listAfter.id);
+    const date=Date.parse(action.date);
+    if(!before||!after||!Number.isFinite(date)||date>Date.now())continue;
+    const wasDone=stages.get(before)==='done',isDone=stages.get(after)==='done';
+    if(wasDone!==isDone&&date>(completions.get(card.id)?.date??-Infinity)) {
+      completions.set(card.id,{date,completedAt:isDone?new Date(date).toISOString():null});
+    }
+  }
   const cards=snapshot.cards,seen=new Set();
   for(const card of cards) {
     if(!validId(card.id)||cards.filter(c=>c.id===card.id).length!==1){count('invalid_or_duplicate_id');continue;}
@@ -25,8 +37,10 @@ export async function importTasks(db,snapshot,config,{apply=false}={}) {
     const binding=await db.collection('proposals').findOne({_id:thread,guild_id:config.guildId,status:'succeeded'});
     let ack;try{ack=JSON.parse(binding?.ack);}catch{}
     if(!binding||!allowed.has(binding.forum_id)||ack?.trello_card_id!==card.id){count('unbound_or_already_imported');continue;}
-    const list=snapshot.lists.find(l=>l.id===card.idList),status=aliases.get(list?.name);
-    if(!status||card.idBoard!==(snapshot.board?.id||snapshot.id)){count('unknown_status_or_board');continue;}
+    const list=snapshot.lists.find(l=>l.id===card.idList),status=stages.get(list?.name);
+    // The former board-scoped readBoard snapshot omitted idBoard from each card.
+    const boardId=snapshot.board?.id||snapshot.id;
+    if(!status||!boardId||(card.idBoard??snapshot.board?.id)!==boardId){count('unknown_status_or_board');continue;}
     if(!validDate(card.start)||!validDate(card.due)||!validDate(card.dateLastActivity)||typeof card.name!=='string'||typeof card.desc!=='string'||!Number.isFinite(binding.received_at)){count('invalid_fields');continue;}
     let desc=card.desc;
     try {
@@ -41,7 +55,7 @@ export async function importTasks(db,snapshot,config,{apply=false}={}) {
       guild_id:config.guildId,channel_id:binding.forum_id,thread_id:thread,source:'legacy_import',version:0,
       closed:!!(card.closed||list.closed||snapshot.board?.closed||snapshot.closed),
       created_at:new Date(binding.received_at).toISOString(),dateLastActivity:card.dateLastActivity||now,
-      completed_at:null,legacy_card:card,imported_at:now};
+      completed_at:status==='done'?(completions.get(card.id)?.completedAt??null):null,legacy_card:card,imported_at:now};
     const outcome=await db.transaction(async session=>{
       const current=await db.collection('proposals').findOne({_id:thread,ack:binding.ack},{session});
       if(!current)return 'binding_changed';

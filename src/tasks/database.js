@@ -67,7 +67,6 @@ export class MongoTasks {
     return row;
   }
   cardsForThread(threadId) {return this.rows.find({guild_id:this.config.guildId,thread_id:threadId}).toArray();}
-  async members() {return [];}
   async progress(id,text) {
     const action={id:new ObjectId().toHexString(),type:'commentCard',date:new Date().toISOString(),data:{card:{id},text}};
     const result=await writeTask(()=>this.rows.updateOne({_id:id,guild_id:this.config.guildId,closed:false},{$set:{last_progress:action,dateLastActivity:action.date},$inc:{version:1}}));

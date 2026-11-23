@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { TaskStore, mappedDiscordOwners } from '../src/tasks/store.js';
 import { TaskService, parseDate } from '../src/tasks/service.js';
-import {trelloTasks} from '../src/tasks/trello.js';
 import {taskConfig} from '../src/tasks/config.js';
 import { controls, taskModal, editModal, descriptionModal, statusModal, taskView, parseDates, descriptionTemplate, taskCommands, registerTaskInteractions } from '../src/tasks/interactions.js';
 import { discordOwners,withDiscordOwners,discordAssigner } from '../src/tasks/owners.js';
@@ -21,7 +20,6 @@ function fixture(){
   const actor={id:person,bot:false,canViewForum:true,roles:[]};
   const writes=[];const comments=[];
   const tasks={board:async()=>({id:boardId,closed:false}),card:async()=>structuredClone(card),
-    members:async()=>[{id:memberId},{id:member2}],
     update:async(id,patch)=>{writes.push(patch);Object.assign(card,patch);return structuredClone(card);},
     progress:async(id,text)=>{const action={id:actionId,data:{card:{id},text}};comments.push(action);writes.push({text});return action;},
     comments:async()=>comments};
@@ -68,11 +66,10 @@ test('progress is owner-only even when all forum members may manage dates',async
     assert.equal(result.action_id,actionId);assert.ok(f.writes[0].text.includes(`CMSFTC_INTERACTION_ID=${operation}`));assert.ok(f.writes[0].text.startsWith('[進度]'));
   }finally{f.db.close();}
 });
-test('member mapping is explicit, one-to-one, validated against real board members',async()=>{
+test('stored legacy owner mappings are one-to-one and resolve Discord IDs',()=>{
   const f=fixture();try{
-    await assert.rejects(f.service.mapMember(f.actor,other,memberId),/task_mapping_conflict/);
-    await assert.rejects(f.service.mapMember(f.actor,other,'a00000000000000000000009'),/task_member_not_on_board/);
-    await f.service.mapMember(f.actor,other,member2);assert.equal(f.store.member(guild,other),member2);
+    assert.throws(()=>f.store.map(guild,other,memberId),/UNIQUE/);
+    f.store.map(guild,other,member2);assert.equal(f.store.member(guild,other),member2);
     assert.deepEqual(mappedDiscordOwners(f.db,guild,[memberId,member2]),[person,other]);
   }finally{f.db.close();}
 });
@@ -121,13 +118,6 @@ test('pending card reservation across SQLite stores prevents concurrent mutation
     f.store.begin(operation,cardId,person,'dates',{due:null});const otherStore=new TaskStore(f.db);
     assert.throws(()=>otherStore.begin('900000000000000016',cardId,person,'dates',{due:null}));assert.equal(otherStore.pending(cardId).interaction_id,operation);
   }finally{f.db.close();}
-});
-test('Trello adapter uses separate write header, only bounded intended methods and no write retry',async()=>{
-  let count=0;
-  const api=trelloTasks({boardId:'testbrd1',key:'fixtureKey',token:'fixtureWriteToken'},{fetchImpl:async(url,options)=>{
-    count++;assert.ok(!url.href.includes('fixtureWriteToken'));assert.ok(options.headers.Authorization.includes('fixtureWriteToken'));assert.equal(options.method,'PUT');return new Response('',{status:503});
-  }});
-  await assert.rejects(api.update(cardId,{due:null}),/task_trello_unconfirmed/);assert.equal(count,1);
 });
 test('UI uses current label modals, bounded owner select and valid guild command schemas',()=>{
   assert.equal(taskModal('dates').toJSON().components.length,2);assert.throws(()=>taskModal('progress'),/task_progress_retired/);

@@ -1,6 +1,6 @@
 import { discordOwners, discordAssigner } from '../tasks/owners.js';
 const DAY = 86400000;
-const stages = new Map([
+export const stages = new Map([
   ['想法', 'idea'], ['想法收集', 'idea'], ['待討論', 'decision'], ['待討論／決策', 'decision'],
   ['待辦事項', 'todo'], ['待執行', 'todo'], ['進行中', 'doing'], ['執行中', 'doing'],
   ['待審核', 'review'], ['待公告', 'announcement'], ['完成', 'done'], ['已完成', 'done'],

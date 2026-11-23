@@ -42,12 +42,6 @@ export class TaskService {
     if(kind==='progress' && (owners ? owners.some(o=>o.id===actor.id) : member && card.idMembers.includes(member)))return;
     throw new Error('task_forbidden');
   }
-  async mapMember(actor,discordId,trelloId) {
-    if(!this.canManage(actor) || !snowflake(discordId) || !cardId(trelloId))throw new Error('task_forbidden');
-    const members=await this.tasks.members();
-    if(!members.some(m=>m.id===trelloId))throw new Error('task_member_not_on_board');
-    try{await this.store.map(this.config.guildId,discordId,trelloId);}catch{throw new Error('task_mapping_conflict');}
-  }
   async execute({id,thread,actor,kind,input}) {
     if(!snowflake(id) || !['dates','owners','progress','edit','description','status'].includes(kind))throw new Error('task_invalid_action');
     let card=await this.context(thread,actor);await this.authorize(kind,actor,card);

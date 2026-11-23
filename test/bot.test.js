@@ -4,13 +4,10 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:http';
-import { once } from 'node:events';
 import { ChannelType, Collection, Events, GatewayIntentBits, PermissionsBitField, PermissionFlagsBits } from 'discord.js';
 import { buildProposal, isTargetThread, initialTask } from '../src/proposal.js';
 import { Store } from '../src/store.js';
 import { Worker } from '../src/worker.js';
-import { sendProposal, validateAck } from '../src/webhook.js';
 import { createClient, createDiscordAdapter, registerEvents } from '../src/discord.js';
 import { loadConfig } from '../src/config.js';
 import { SyncError, backoff, discordError } from '../src/errors.js';
@@ -193,42 +190,6 @@ test('retry exhaustion is durable and requires explicit admin retry', async t =>
   assert.equal(h.store.retry(id, false, 9_999_999), false);
 });
 
-test('HTTP request includes idempotency key and optional Make API key', async () => {
-  let options;
-  const result = await sendProposal(proposal(), { webhookUrl: 'https://hook.make.com/test-fixture', webhookApiKey: 'test-only' }, {
-    fetchImpl: async (_, request) => { options = request; return new Response(JSON.stringify(ack)); },
-  });
-  assert.equal(result.trello_card_url, ack.trello_card_url); assert.equal(options.redirect, 'error');
-  assert.equal(options.headers['idempotency-key'], id); assert.equal(options.headers['x-make-apikey'], 'test-only');
-});
-
-test('Accepted, pending, mismatched IDs and malicious URLs are not successful acknowledgments', async () => {
-  for (const body of ['Accepted', JSON.stringify({ status: 'pending', thread_id: id }),
-    JSON.stringify({ ...ack, thread_id: 'wrong' }), JSON.stringify({ ...ack, trello_card_url: 'https://trello.com.evil.test/c/Test1234' })]) {
-    await assert.rejects(sendProposal(proposal(), {}, { fetchImpl: async () => new Response(body) }), { code: 'make_unconfirmed' });
-  }
-  assert.equal(validateAck({ ...ack, trello_card_id: '' }, id), false);
-  await assert.rejects(sendProposal(proposal(), {}, { fetchImpl: async () => new Response(JSON.stringify(ack), { status: 202 }) }),
-    { code: 'make_unconfirmed' });
-});
-
-test('Make acceptance without a Trello acknowledgment never triggers a Discord success reply', async t => {
-  const h = harness(t, { send: p => sendProposal(p, {}, { fetchImpl: async () => new Response('Accepted') }) });
-  h.store.enqueue(id, config);
-  for (let n = 0; n < 5; n++) { await h.worker.tick(); h.advance(); }
-  assert.equal(h.store.get(id).status, 'failed'); assert.equal(h.store.get(id).last_error, 'make_unconfirmed');
-  assert.equal(h.calls.notify, 0);
-});
-
-test('HTTP 403 stops retries; HTTP 429 honors Retry-After; oversized bodies are rejected', async () => {
-  await assert.rejects(sendProposal(proposal(), {}, { fetchImpl: async () => new Response('secret', { status: 403 }) }),
-    e => e.code === 'make_http_403' && !e.retryable && !e.message.includes('secret'));
-  await assert.rejects(sendProposal(proposal(), {}, { fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '90' } }) }),
-    e => e.retryAfterMs === 90_000);
-  await assert.rejects(sendProposal(proposal(), {}, { fetchImpl: async () => new Response('x'.repeat(70_000)) }),
-    { code: 'make_response_too_large' });
-});
-
 test('missing send permission skips Discord reply without undoing successful sync', async t => {
   const h = harness(t); h.store.enqueue(id, config);
   h.worker.discord.notify = async () => ({ skipped: true, code: 'notification_permission_or_archived' });
@@ -292,29 +253,4 @@ test('configuration needs Discord but no Make or Trello credentials',()=>{
   assert.throws(()=>loadConfig({...env,TEAM_CHANNEL_ACCESS_ENABLED:'yes'}),/invalid_TEAM_CHANNEL_ACCESS_ENABLED/);
   assert.throws(()=>loadConfig({...env,DISCORD_GUILD_ID:'123'}),/invalid_DISCORD_GUILD_ID/);
   assert.equal(backoff(1,()=>0),2000);assert.equal(backoff(5,()=>0),32000);
-});
-
-async function serverFixture(t, handler) {
-  const server = createServer(handler); server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
-  return { webhookUrl: `http://127.0.0.1:${server.address().port}` };
-}
-
-test('real HTTP timeout cannot produce success', async t => {
-  const endpoint = await serverFixture(t, () => {});
-  await assert.rejects(sendProposal(proposal(), endpoint, { timeoutMs: 30 }), { code: 'make_network_or_timeout' });
-});
-
-test('simulated Make creates once, loses first response, and returns existing Trello card on retry', async t => {
-  let requests = 0, creations = 0; const records = new Map();
-  const endpoint = await serverFixture(t, async (req, res) => {
-    let body = ''; for await (const chunk of req) body += chunk;
-    const p = JSON.parse(body); requests++;
-    if (!records.has(p.thread_id)) { creations++; records.set(p.thread_id, ack); req.socket.destroy(); return; }
-    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(records.get(p.thread_id)));
-  });
-  const h = harness(t, { send: p => sendProposal(p, endpoint) }); h.store.enqueue(id, config);
-  await h.worker.tick(); assert.equal(h.calls.notify, 0); assert.equal(h.store.get(id).status, 'awaiting_confirmation');
-  h.advance(); await h.worker.tick();
-  assert.equal(requests, 2); assert.equal(creations, 1); assert.equal(h.calls.notify, 1);
 });

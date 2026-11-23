@@ -307,6 +307,24 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     assert.equal((await importTasks(db,{...snapshot,cards:[other]},scope,{apply:true})).results.unbound_or_already_imported,1);
     assert.equal((await importTasks(db,{...snapshot,cards:[card,{...card,id:'3234567890abcdef12345678'}]},scope)).results.duplicate_thread,2);
   });
+  await t.test('legacy import restores only documented completions and preserves reopened or unknown dates',async()=>{
+    const lists=[{id:'finished',name:'已完成'},{id:'active',name:'進行中'}];
+    const cards=[],actions=[];
+    for(const [index,idList] of ['finished','finished','active','finished'].entries()) {
+      const id='b'.repeat(23)+index,thread='90000000000000018'+index;
+      await db.collection('proposals').insertOne({_id:thread,guild_id:guild,forum_id:forum,status:'succeeded',
+        ack:JSON.stringify({trello_card_id:id}),received_at:now});
+      cards.push({id,idList,name:'History',desc:'CMSFTC_THREAD_ID='+thread});
+    }
+    const move=(index,day,before,after)=>({type:'updateCard',date:'2020-01-0'+day+'T00:00:00Z',
+      data:{card:{id:cards[index].id},listBefore:{id:before},listAfter:{id:after}}});
+    actions.push(move(0,3,'active','finished'),move(0,2,'finished','active'),move(0,1,'active','finished'),
+      move(2,1,'active','finished'),move(3,1,'active','finished'),move(3,2,'finished','active'));
+    const snapshot={board:{id:'board'},lists,cards,actions};
+    assert.equal((await importTasks(db,snapshot,config,{apply:true})).results.imported,4);
+    const rows=await db.collection('tasks').find({_id:{$in:cards.map(card=>card.id)}}).sort({_id:1}).toArray();
+    assert.deepEqual(rows.map(row=>row.completed_at),['2020-01-03T00:00:00.000Z',null,null,null]);
+  });
   await t.test('legacy import rolls back task creation if updating the binding fails',async()=>{
     const tid='900000000000000177',id='4234567890abcdef12345678',ack=JSON.stringify({trello_card_id:id});
     await db.collection('proposals').insertOne({_id:tid,guild_id:guild,forum_id:forum,status:'succeeded',ack,received_at:now});

@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { analyze, renderReport, messageChunks } from '../src/pm/report.js';
-import { readBoard } from '../src/pm/trello.js';
 import { notifyThreads } from '../src/pm/notify.js';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
@@ -38,15 +37,6 @@ test('new proposals need recorded creation action, not arbitrary current cards',
 });
 test('report preserves unknowns, removes title mentions and bounds Discord chunks',()=>{
   const s=sample();s.cards[0].name='@everyone <@123>\n任務';const r=analyze(s,{now});assert.equal(r.tasks[0].priority,null);const text=renderReport(r,'weekly');assert.doesNotMatch(text,/https?:\/\/\S+/);assert.ok(text.includes('建議下次 Mentor'));assert.ok(!text.includes('@everyone'));assert.ok(messageChunks((text+'\n').repeat(10)).every(c=>c.length<=1800));
-});
-test('Trello reader uses only GET, header credentials, retries and paginated actions',async()=>{
-  let retries=0,pages=0;const s=sample();
-  const fetchImpl=async(url,options)=>{assert.equal(options.method,'GET');assert.ok(!url.href.includes('secret'));assert.ok(options.headers.Authorization.includes('secret'));
-    const path=url.pathname;if(path.endsWith('/actions')){pages++;return Response.json(pages===1?Array.from({length:1000},(_,i)=>({id:String(i)})):[]);}if(path.endsWith('/cards')){if(!retries++){return new Response('',{status:503});}return Response.json(s.cards);}if(path.endsWith('/lists'))return Response.json(s.lists);if(path.endsWith('/members'))return Response.json(s.members);return Response.json(s.board);};
-  const result=await readBoard({boardId:'abcdefgh',key:'secretKey',token:'secretToken'},{fetchImpl,wait:async()=>{},now});assert.equal(result.actions.length,1000);assert.equal(pages,2);assert.equal(retries,2);
-});
-test('Trello permission failure stops read without exposing response body',async()=>{
-  await assert.rejects(readBoard({boardId:'abcdefgh',key:'key',token:'token'},{fetchImpl:async()=>new Response('SECRET',{status:403})}),/pm_trello_http_403/);
 });
 function config(path){return {guildId:guild,forumId:forum,token:'localTestToken',databasePath:path};}
 test('thread reminder sends only to matching forum, suppresses mentions and persists dedupe across restart',async()=>{
