@@ -20,7 +20,7 @@
     "tasks:import": "node src/tasks/import.js"
   },
   "dependencies": {
-    "discord.js": "14.27.0",
+    "discord.js": "14.28.1",
     "mongodb": "7.7.0"
   },
   "devDependencies": {
