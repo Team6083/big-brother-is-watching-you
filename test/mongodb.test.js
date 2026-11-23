@@ -1,3 +1,4 @@
+import {MongoNetworkError,MongoServerError} from 'mongodb';
 import {MongoTasks} from '../src/tasks/database.js';
 import {importTasks} from '../src/tasks/import.js';
 import {collectReport} from '../src/pm/monitor.js';
@@ -186,7 +187,7 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     const creation=new MongoCreationStore(db),parent='900000000000000010',teamThread='900000000000000120',operation='900000000000000121';
     const board='eeeeeeeeeeeeeeeeeeeeeeee',list='ffffffffffffffffffffffff';let writes=0,pings=0,threads=0;const cards=[];
     const tasks={board:async()=>({id:board}),lists:async()=>[{id:list,idBoard:board,name:'待執行'}],card:async()=>cards[0],cardsForThread:async()=>cards,
-      create:async payload=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,shortUrl:'https://discord.com/channels/'+guild+'/'+teamThread,closed:false});throw Error('task_storage_unconfirmed');}};
+      create:async (payload,{creationId})=>{writes++;cards.push({...payload,id:'dddddddddddddddddddddddd',idBoard:board,source:'discord',creation_id:creationId,shortUrl:'https://discord.com/channels/'+guild+'/'+teamThread,closed:false});throw Error('task_storage_unconfirmed');}};
     const discord={createThread:async()=>{threads++;return {id:teamThread,guildId:guild,parentId:parent,type:11};},notify:async()=>{pings++;return {id:actor};}};
     const service=new TaskCreationService({store:creation,tasks,discord,authorize:async()=>{}});
     const op={id:operation,guild,channel:parent,actor,input:{title:'Team task',description:'Synthetic',ids:[actor],assigner:[actor,'900000000000000122'],status:list,due:'2026-10-20'}};
@@ -238,9 +239,20 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
       assert.equal((await native.card(task.id)).version,1);
       const stale=await native.card(task.id);await native.update(task.id,{due:'2026-11-20T15:59:00.000Z'},{version:stale.version});
       await assert.rejects(native.update(task.id,{due:null},{version:stale.version}),/task_conflict/);
-      const update=controls.tasks.update.bind(controls.tasks);
-      controls.tasks.update=async(...args)=>{await update(...args);throw Error('task_storage_unconfirmed');};
-      await assert.rejects(controls.execute({...edit,id:'900000000000000153',kind:'dates',input:{due:'2026-11-21'}}),/task_storage_unconfirmed/);
+      const taskRows=controls.tasks.rows,write=taskRows.findOneAndUpdate;
+      const rejectedId='900000000000000156',lostId='900000000000000153';
+      try {
+        taskRows.findOneAndUpdate=async()=>{throw new MongoServerError({code:121,message:'Synthetic validation failure'});};
+        await assert.rejects(controls.execute({...edit,id:rejectedId,kind:'dates',input:{due:'2026-11-21'}}),/task_storage_failed/);
+        assert.equal((await taskStore.get(rejectedId)).state,'failed');
+        assert.equal(await taskStore.pending(task.id),undefined);
+        taskRows.findOneAndUpdate=async function(...args) {
+          await write.apply(this,args);
+          throw new MongoNetworkError('Synthetic lost acknowledgment');
+        };
+        await assert.rejects(controls.execute({...edit,id:lostId,kind:'dates',input:{due:'2026-11-21'}}),/task_storage_unconfirmed/);
+        assert.equal((await taskStore.get(lostId)).state,'pending');
+      } finally {taskRows.findOneAndUpdate=write;}
       const restarted=new TaskService({...controls,tasks:new MongoTasks(db,config)});
       await restarted.reconcile(thread,manager);
       assert.equal((await taskStore.get('900000000000000153')).state,'succeeded');
@@ -305,6 +317,57 @@ test('MongoDB replica-set integration', {timeout:360000},async t=>{
     finally {db.collection=collection;}
     assert.equal(await db.collection('tasks').findOne({_id:id}),null);assert.equal((await queue.get(tid)).ack,ack);
     snapshot.cards[0].idList='custom';assert.equal((await importTasks(db,snapshot,config)).results.unknown_status_or_board,1);
+  });
+  await t.test('creation reports a conflicting thread task without modifying it or rebinding',async()=>{
+    const parent='900000000000000010',tid='900000000000000162',id='900000000000000163';
+    const native=new MongoTasks(db,config),creation=new MongoCreationStore(db);
+    const payload={name:'Existing',desc:'CMSFTC_THREAD_ID='+tid,idList:'todo',start:null,due:null};
+    const existing=await native.create(payload,{threadId:tid,channelId:parent,source:'legacy_import'});
+    await native.rows.updateOne({_id:existing.id},{$set:{closed:true}});
+    const service=new TaskCreationService({store:creation,tasks:native,authorize:async()=>{},discord:{
+      createThread:async()=>({id:tid,guildId:guild,parentId:parent,type:11}),
+      notify:async()=>assert.fail('conflict must not send a notice'),
+    }});
+    const input={title:'New task',description:'Synthetic',ids:[actor],assigner:actor,status:'todo'};
+    await assert.rejects(service.create({id,guild,channel:parent,actor,input}),/create_binding_conflict/);
+    await assert.rejects(service.reconcile(id,{guild_id:guild,channel_id:parent,actor_id:actor}),/create_binding_conflict/);
+    assert.deepEqual(await native.card(existing.id),{...existing,closed:true});
+    assert.equal(await queue.get(tid),undefined);
+  });
+  await t.test('legacy confirmation sends once after import, including when import races a worker',async()=>{
+    const native=new MongoTasks(db,config);
+    for(const [suffix,race] of [['195',false],['196',true]]) {
+      const tid='900000000000000'+suffix,cardId='0123456789abcdefabcde'+suffix;
+      const ack=JSON.stringify({trello_card_id:cardId});
+      await queue.enqueue(tid,config,now);
+      await queue.rows.updateOne({_id:tid},{$set:{status:'succeeded',ack,notification_attempts:race?2:0}});
+      const snapshot={id:'board',lists:[{id:'list',name:'待執行'}],cards:[{id:cardId,idBoard:'board',idList:'list',name:'Legacy',desc:'CMSFTC_THREAD_ID='+tid}]};
+      let sends=0;
+      const apply=async()=>assert.equal((await importTasks(db,snapshot,config,{apply:true})).results.imported,1);
+      const worker=new Worker({store:queue,config,discord:{notify:async(id,ack)=>{
+        assert.equal(id,tid);
+        if(!ack.task_id) {
+          if(race)await apply();
+          return {skipped:true,code:'legacy_task_not_imported'};
+        }
+        assert.equal(ack.task_id,(await native.card(cardId)).id);
+        sends++;
+        return {id:actor};
+      }},log:()=>{},now:()=>now});
+      await worker.tick();
+      if(!race) {
+        assert.equal((await queue.get(tid)).notification_error,'legacy_task_not_imported');
+        await apply();
+      }
+      const restored=await queue.get(tid);
+      assert.equal(restored.notification_status,'pending');
+      assert.equal(restored.notification_attempts,0);
+      assert.equal(restored.notification_error,null);
+      await worker.tick();
+      await worker.tick();
+      assert.equal(sends,1);
+      assert.equal((await queue.get(tid)).notification_status,'sent');
+    }
   });
   await t.test('Bank baseline, atomic claim and receipts survive store and monitor restarts',async()=>{
     const bank=new MongoBankStore(db),source='synthetic_bank_source',tasks=[{id:'1',active:true,url:'https://bank.example.org/mission/1'}];

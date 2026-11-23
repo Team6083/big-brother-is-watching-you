@@ -1,4 +1,4 @@
-import {ObjectId} from 'mongodb';
+import {MongoError,MongoNetworkError,MongoOperationTimeoutError,MongoWriteConcernError,ObjectId} from 'mongodb';
 
 // Keep the existing task/form fields so the Discord workflow does not change.
 export const statuses=[
@@ -7,6 +7,18 @@ export const statuses=[
 ];
 const snowflake=id=>/^\d{17,20}$/.test(id||'');
 const taskId=id=>/^[a-f0-9]{24}$/i.test(id||'');
+
+async function writeTask(write) {
+  try {return await write();}
+  catch(error) {
+    if(error instanceof MongoError && !error.hasErrorLabel('NoWritesPerformed') &&
+      (error instanceof MongoNetworkError || error instanceof MongoOperationTimeoutError ||
+        error instanceof MongoWriteConcernError || error.hasErrorLabel('RetryableWriteError'))) {
+      throw new Error('task_storage_unconfirmed',{cause:error});
+    }
+    throw error;
+  }
+}
 
 export class MongoTasks {
   constructor(db,config) {this.db=db;this.rows=db.collection('tasks');this.config=config;}
@@ -18,7 +30,7 @@ export class MongoTasks {
     if(!row)throw new Error('task_legacy_unavailable');
     return row;
   }
-  async create(payload,{threadId,channelId,source='discord',createdAt,proposal}={}) {
+  async create(payload,{threadId,channelId,source='discord',createdAt,proposal,creationId}={}) {
     if(!snowflake(threadId)||!snowflake(channelId)||!snowflake(this.config.guildId)||
       !payload.desc?.includes('CMSFTC_THREAD_ID='+threadId))throw new Error('task_invalid_source');
     if(!statuses.some(([id])=>id===payload.idList))throw new Error('task_invalid_status');
@@ -27,14 +39,20 @@ export class MongoTasks {
       guild_id:this.config.guildId,channel_id:channelId,thread_id:threadId,source,version:0,
       shortUrl:'https://discord.com/channels/'+this.config.guildId+'/'+threadId,
       created_at:createdAt||at,dateLastActivity:at,completed_at:payload.idList==='done'?at:null,
-      ...(proposal?{proposal}:{})};
+      ...(proposal?{proposal}:{}),...(creationId?{creation_id:creationId}:{})};
+    const scope={guild_id:this.config.guildId,thread_id:threadId};
+    let existing;
     try {
-      return await this.rows.findOneAndUpdate({guild_id:this.config.guildId,thread_id:threadId},
+      existing=await this.rows.findOneAndUpdate(scope,
         {$setOnInsert:row},{upsert:true,returnDocument:'after',includeResultMetadata:false});
     } catch(error) {
       if(error.code!==11000)throw error;
-      return await this.rows.findOne({guild_id:this.config.guildId,thread_id:threadId});
+      existing=await this.rows.findOne(scope);
+      if(!existing)throw error;
     }
+    if(existing.source!==source || existing.channel_id!==channelId ||
+      (existing.creation_id!=null && existing.creation_id!==creationId))throw new Error('create_binding_conflict');
+    return existing;
   }
   async update(id,patch,{version}={}) {
     if(Object.keys(patch).some(k=>!['name','desc','start','due','idList'].includes(k)))throw new Error('task_invalid_action');
@@ -43,8 +61,8 @@ export class MongoTasks {
     version??=current.version;
     if(patch.idList!==undefined)changes.dueComplete=patch.idList==='done';
     if(patch.idList!==undefined&&patch.idList!==current.idList)changes.completed_at=patch.idList==='done'?at:null;
-    const row=await this.rows.findOneAndUpdate({_id:id,guild_id:this.config.guildId,closed:false,...(version!==undefined?{version}:{})},
-      {$set:changes,$inc:{version:1}},{returnDocument:'after',includeResultMetadata:false});
+    const row=await writeTask(()=>this.rows.findOneAndUpdate({_id:id,guild_id:this.config.guildId,closed:false,...(version!==undefined?{version}:{})},
+      {$set:changes,$inc:{version:1}},{returnDocument:'after',includeResultMetadata:false}));
     if(!row)throw new Error('task_conflict');
     return row;
   }
@@ -52,7 +70,7 @@ export class MongoTasks {
   async members() {return [];}
   async progress(id,text) {
     const action={id:new ObjectId().toHexString(),type:'commentCard',date:new Date().toISOString(),data:{card:{id},text}};
-    const result=await this.rows.updateOne({_id:id,guild_id:this.config.guildId,closed:false},{$set:{last_progress:action,dateLastActivity:action.date},$inc:{version:1}});
+    const result=await writeTask(()=>this.rows.updateOne({_id:id,guild_id:this.config.guildId,closed:false},{$set:{last_progress:action,dateLastActivity:action.date},$inc:{version:1}}));
     if(result.matchedCount!==1)throw new Error('task_conflict');
     return action;
   }

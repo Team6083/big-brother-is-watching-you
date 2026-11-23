@@ -25,7 +25,7 @@ class FakeStore {
 function fixture() {
   const store=new FakeStore(),cards=[];let posts=0,threads=0,notices=0;
   const tasks={board:async()=>({id:board,closed:false}),lists:async()=>[{id:list,idBoard:board,name:'待執行',closed:false}],
-    create:async payload=>{posts++;const card={...payload,id:cardId,idBoard:board,closed:false,shortUrl:'https://discord.com/channels/'+guild+'/'+thread};cards.push(card);return structuredClone(card);},
+    create:async (payload,{creationId}={})=>{posts++;const card={...payload,id:cardId,idBoard:board,source:'discord',creation_id:creationId,closed:false,shortUrl:'https://discord.com/channels/'+guild+'/'+thread};cards.push(card);return structuredClone(card);},
     cardsForThread:async()=>structuredClone(cards),card:async()=>structuredClone(cards[0])};
   const discord={createThread:async()=>{threads++;return {id:thread,guildId:guild,parentId:channel,type:11};},
     notify:async row=>{notices++;assert.equal((await store.get(row.id)).state,'succeeded');return {id:actor};}};
@@ -72,7 +72,7 @@ test('one confirmed creation binds a thread for existing task controls and survi
 });
 
 test('lost database response is reconciled by readback after restart without another create',async()=>{
-  const f=fixture(),create=f.tasks.create;f.tasks.create=async p=>{await create(p);throw Error('task_storage_unconfirmed');};
+  const f=fixture(),create=f.tasks.create;f.tasks.create=async (...args)=>{await create(...args);throw Error('task_storage_unconfirmed');};
   await assert.rejects(f.service.create(f.op));assert.equal((await f.store.get(id)).state,'card_pending');assert.equal(f.counts().notices,0);
   const restarted=new TaskCreationService({...f.service});await restarted.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor});
   assert.deepEqual(f.counts(),{posts:1,threads:1,notices:1});
@@ -81,8 +81,8 @@ test('lost database response is reconciled by readback after restart without ano
 test('unconfirmed or conflicting cards cannot announce success or create again',async()=>{
   for(const kind of ['missing','partial','duplicates']) {
     const f=fixture();const create=f.tasks.create;
-    f.tasks.create=async p=>{if(kind==='missing')throw Error('network');const card=await create(p);if(kind==='partial'){f.cards[0].idList='other';card.idList='other';}if(kind==='duplicates')f.cards.push({...card,id:'dddddddddddddddddddddddd'});throw Error('network');};
-    await assert.rejects(f.service.create(f.op));await assert.rejects(f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor}),/create_pending/);
+    f.tasks.create=async (...args)=>{if(kind==='missing')throw Error('network');const card=await create(...args);if(kind==='partial'){f.cards[0].idList='other';card.idList='other';}if(kind==='duplicates')f.cards.push({...card,id:'dddddddddddddddddddddddd'});throw Error('network');};
+    await assert.rejects(f.service.create(f.op));await assert.rejects(f.service.reconcile(id,{guild_id:guild,channel_id:channel,actor_id:actor}),kind==='missing'?/create_pending/:/create_binding_conflict/);
     assert.equal(f.counts().notices,0);assert.equal(f.counts().threads,1);assert.ok(f.counts().posts<=1);
   }
 });
@@ -115,7 +115,7 @@ function interactionFixture(assignees=[assignee],mode='forum',teamChannelAccess=
   const base={id,guildId:guild,channelId:channel,channel:parent,member:members.get(actor),user:members.get(actor).user,
     isChatInputCommand:()=>false,isButton:()=>false,isStringSelectMenu:()=>false,isModalSubmit:()=>false,
     deferUpdate:async()=>{},deferReply:async payload=>{result.flags=payload.flags;},editReply:async payload=>{result.reply=payload;},update:async payload=>{result.reply=payload;},reply:async payload=>{result.reply=payload;},showModal:async m=>{modal=m.toJSON();}};
-  return {...f,parent,members,get result(){return result;},get modal(){return modal;},setActor:v=>{actorAllowed=v;},setTarget:v=>{targetAllowed=v;},setBot:v=>{botAllowed=v;},
+  return {...f,parent,channels,members,get result(){return result;},get modal(){return modal;},setActor:v=>{actorAllowed=v;},setTarget:v=>{targetAllowed=v;},setBot:v=>{botAllowed=v;},
     run:async patch=>{result??={};await handler({...base,...patch});return result.reply;},
     command:()=>({commandName:'建立任務',isChatInputCommand:()=>true,options:{getString:()=>null}}),
     button:action=>({customId:'create_task:'+action+':'+id,isButton:()=>true}),select:(action,value)=>({customId:'create_task:'+action+':'+id,isStringSelectMenu:()=>true,values:[value]}),
@@ -150,6 +150,32 @@ test('each selected assignee must still be human and authorized when confirming 
     await f.run(f.button('save'));assert.match(f.result.reply.content,/人類成員/);
     assert.equal(f.counts().threads,0);assert.equal(f.counts().posts,0);
   }
+});
+
+test('a successful legacy receipt can be checked or replayed with the old list ID',async()=>{
+  const f=fixture(),scope={guild_id:guild,channel_id:channel,actor_id:actor};
+  await f.store.reserve({id,...scope,input});
+  await f.store.attachThread(id,thread);
+  await f.store.finish(id,{id:cardId});
+  f.tasks.lists=async()=>assert.fail('a completed receipt needs no status lookup');
+  f.service.authorize=async (_,options)=>assert.equal(options.receiptOnly,true);
+  assert.equal((await f.service.reconcile(id,scope)).state,'succeeded');
+  assert.equal((await f.service.create(f.op)).thread_id,thread);
+  assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
+});
+
+test('Discord check returns a successful legacy receipt even if its assignee left or thread was locked',async()=>{
+  const f=interactionFixture();
+  await f.store.reserve({id,guild_id:guild,channel_id:channel,actor_id:actor,input});
+  await f.store.attachThread(id,thread);
+  await f.store.finish(id,{id:cardId});
+  f.channels.set(thread,{guildId:guild,parentId:channel,type:11,locked:true});
+  f.members.delete(assignee);
+  f.setBot(false);
+  await f.run({...f.command(),options:{getString:()=>id}});
+  assert.match(f.result.reply.content,/先前已建立/);
+  assert.ok(f.result.reply.content.includes('<#'+thread+'>'));
+  assert.deepEqual(f.counts(),{posts:0,threads:0,notices:0});
 });
 
 test('a legacy pending receipt stays intact and cannot be silently recreated',async()=>{

@@ -128,11 +128,16 @@ export class TaskService {
             (['dates','edit','status'].includes(kind) && Object.keys(payload).some(key=>['start','due'].includes(key)?!sameDate(updated[key] ?? null,payload[key]):updated[key]!==payload[key])))throw new Error('task_storage_unconfirmed');
         result={kind,card_id:card.id,url:card.shortUrl};
       }
-      await this.store.finish(id,result);return result;
     } catch(error) {
-      if(error.message==='task_conflict') {await this.store.fail(id);throw error;}
-      throw new Error('task_storage_unconfirmed');
+      if(error.message==='task_storage_unconfirmed')throw error;
+      await this.store.fail(id);
+      if(['task_conflict','task_legacy_unavailable','task_invalid_action','task_invalid_status'].includes(error.message))throw error;
+      throw new Error('task_storage_failed');
     }
+    // The task write succeeded; a receipt failure requires readback, not another write.
+    try {await this.store.finish(id,result);}
+    catch {throw new Error('task_storage_unconfirmed');}
+    return result;
   }
   async reconcile(thread,actor) {
     if(!this.canManage(actor))throw new Error('task_forbidden');

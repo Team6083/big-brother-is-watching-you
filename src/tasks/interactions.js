@@ -115,6 +115,7 @@ const errors = {
   task_invalid_date_format:'日期請分兩行：開始：YYYY-MM-DD、截止：YYYY-MM-DD；留空保留，填 - 清除。',
   task_date_order:'截止日期不能早於開始日期。', task_empty_update:'請至少填寫一項要更改的日期。',
   task_pending_review:'已有更新未能確認，請先按「核對未確認更新」；核對前不重複送出。',
+  task_storage_failed:'此次更新未儲存，請重新開啟 /任務 再試。',
   task_storage_unconfirmed:'尚未確認任務已儲存。請先按「核對未確認更新」，不要反覆提交。',
   task_conflict:'任務已被其他操作變更，請重新開啟 /任務 後再試。',
   task_nothing_to_reconcile:'目前沒有待核對的更新。',

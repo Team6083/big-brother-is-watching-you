@@ -18,12 +18,17 @@ export class MongoStore {
       $or:[{status:{$in:['pending','awaiting_confirmation']}},{status:'succeeded',notification_status:'pending'}]},
       {$set:{lease_until:now+120000,lease_token:randomUUID()}},{sort:{next_attempt_at:1,received_at:1},returnDocument:'after',includeResultMetadata:false})??undefined;
   }
-  async update(row,fields) {
+  async update(row,fields,{ifAck}={}) {
     const allowed=new Set(['status','payload','task_snapshot','ack','fetch_attempts','send_attempts','next_attempt_at','last_error','confirmed_at','notification_status','notification_attempts','notification_message_id','notification_error']);
     if(!Object.keys(fields).length || Object.keys(fields).some(k=>!allowed.has(k)) || 'status' in fields&&!['pending','awaiting_confirmation','succeeded','failed'].includes(fields.status) ||
       'notification_status' in fields&&!['pending','sent','failed','skipped'].includes(fields.notification_status))throw new Error('invalid_store_update');
-    const result=await this.rows.updateOne({_id:row.thread_id,lease_token:row.lease_token},{$set:fields});
-    if(result.matchedCount!==1)throw new Error('lease_lost');
+    const filter={_id:row.thread_id,lease_token:row.lease_token};
+    if(ifAck!==undefined)filter.ack=ifAck;
+    const result=await this.rows.updateOne(filter,{$set:fields});
+    if(result.matchedCount!==1) {
+      if(ifAck!==undefined)return false;
+      throw new Error('lease_lost');
+    }
     Object.assign(row,fields);
   }
   release(row) {return this.rows.updateOne({_id:row.thread_id,lease_token:row.lease_token},{$set:{lease_until:0,lease_token:null}});}

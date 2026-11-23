@@ -21,6 +21,7 @@ const errors={
   create_expired:'表單已過期或不屬於你，請重新使用 /建立任務；若已確認建立，請以原操作編號核對。',
   task_invalid_status:'任務狀態不可使用，請重新開啟表單。',
   create_thread_uncertain:'建立討論串的結果尚未確認，請管理員依操作編號核對 Discord 與資料庫；不要重複建立。',
+  create_binding_conflict:'此討論串已有不相符的任務，請管理員依操作編號核對原任務與綁定。',
   create_legacy_pending:'這是切換前的建立紀錄，請管理員核對舊資料；不會重複建立。',
   create_pending:'建立結果尚未確認，請按「核對建立結果」。若仍未找到，請管理員核對；不要重複建立。',
 };
@@ -29,19 +30,20 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
   if(!policy.enabled || !teamChannelIds.length)return {get running(){return false;}};
   tasks??=new MongoTasks(proposalStore.db,config);store??=new MongoCreationStore(proposalStore.db);
   const canManage=member=>policy.teamChannelAccess || policy.mode==='forum' || (policy.mode==='roles' && policy.roleIds.some(id=>member.roles.cache.has(id)));
-  async function authorize(row) {
+  async function authorize(row,{receiptOnly=false}={}) {
     const channel=await client.channels.fetch(row.channel_id,{force:true});
     if(row.guild_id!==config.guildId || !isTeamTaskChannel(channel,config))throw new Error('create_forbidden');
     const actor=await channel.guild.members.fetch({user:row.actor_id,force:true});
     if(actor.user.bot||!canManage(actor)||!channel.permissionsFor(actor)?.has(userPermissions))throw new Error('create_forbidden');
-    if(!channel.permissionsFor(client.user)?.has(botPermissions))throw new Error('create_bot_permissions');
-    for(const id of new Set([...(row.input?.ids||[]),...(row.input?assigneeIds(row.input.assigner):[])])) {
+    if(!receiptOnly && !channel.permissionsFor(client.user)?.has(botPermissions))throw new Error('create_bot_permissions');
+    const people=receiptOnly || !row.input?[]:[...row.input.ids,...assigneeIds(row.input.assigner)];
+    for(const id of new Set(people)) {
       const member=await channel.guild.members.fetch({user:id,force:true});
       if(member.user.bot || !channel.permissionsFor(member)?.has(userPermissions))throw new Error('create_invalid_members');
     }
     if(row.thread_id) {
       const thread=await client.channels.fetch(row.thread_id,{force:true});
-      if(thread?.guildId!==config.guildId || thread.parentId!==row.channel_id || thread.type!==ChannelType.PublicThread || thread.locked)throw new Error('create_pending');
+      if(thread?.guildId!==config.guildId || thread.parentId!==row.channel_id || thread.type!==ChannelType.PublicThread || (!receiptOnly&&thread.locked))throw new Error('create_pending');
     }
     return channel;
   }
@@ -64,7 +66,13 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
     return d;
   };
   const scope=i=>({guild_id:i.guildId,channel_id:i.channelId,actor_id:i.user.id});
-  const success=row=>({content:`✅ 任務已建立，請到 <#${row.thread_id}> 討論與更新。${row.notification_state==='sent'?'':'\n討論串通知尚未確認，請先查看討論串。'}`,embeds:[],components:[],allowedMentions:{parse:[]}});
+  const success=row=>{
+    const content=row.backend!=='mongodb'
+      ? '✅ 此任務先前已建立。討論串：<#'+row.thread_id+'>'
+      : '✅ 任務已建立，請到 <#'+row.thread_id+'> 討論與更新。'+
+        (row.notification_state==='sent'?'':'\n討論串通知尚未確認，請先查看討論串。');
+    return {content,embeds:[],components:[],allowedMentions:{parse:[]}};
+  };
   client.on(Events.InteractionCreate,async i=>{
     const command=i.isChatInputCommand();
     if(command?i.commandName!=='建立任務':!i.customId?.startsWith('create_task:'))return;
@@ -73,12 +81,12 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
       if(i.guildId!==config.guildId||!isTeamTaskChannel(i.channel,config)||i.user.bot||!i.channel.permissionsFor(i.member)?.has(userPermissions))throw new Error('create_forbidden');
       if(command) {
         await i.deferReply({flags:MessageFlags.Ephemeral});
-        await authorize(scope(i));
         const check=i.options.getString('核對編號');
         if(check) {
           if(!/^\d{17,20}$/.test(check))throw new Error('create_forbidden');
           operation=check;return await i.editReply(success(await service.reconcile(check,scope(i))));
         }
+        await authorize(scope(i));
         const [board,lists]=await Promise.all([tasks.board(),tasks.lists()]);
         const open=lists.filter(l=>!l.closed&&l.idBoard===board.id);
         if(board.closed||!open.length||open.length>25)throw new Error('task_invalid_status');
@@ -133,9 +141,10 @@ export function registerTeamTaskCreation(client,proposalStore,config,log,{policy
       }
       log('team_task_creation_failed',{code:Object.hasOwn(errors,error.message)?error.message:'create_operation_failed'});
       const message=errors[error.message]||'操作未完成，請管理員檢查權限與連線。';
-      const reply={content:message+(operation?'\n操作編號：'+operation+'\n可用 /建立任務 的「核對編號」選項查詢；核對不會重建。':''),allowedMentions:{parse:[]}};
+      const canCheck=operation&&error.message!=='create_binding_conflict';
+      const reply={content:message+(operation?'\n操作編號：'+operation:'')+(canCheck?'\n可用 /建立任務 的「核對編號」選項查詢；核對不會重建。':''),allowedMentions:{parse:[]}};
       try {
-        if(i.deferred||i.replied)await i.editReply({...reply,...(operation?{embeds:[],components:creationCheckControls(operation)}:{})});
+        if(i.deferred||i.replied)await i.editReply({...reply,...(operation?{embeds:[],components:canCheck?creationCheckControls(operation):[]}:{})});
         else await i.reply({...reply,flags:MessageFlags.Ephemeral});
       } catch {log('team_task_creation_failed',{code:'create_reply_failed'});}
     } finally {active--;}

@@ -49,7 +49,12 @@ export async function importTasks(db,snapshot,config,{apply=false}={}) {
       if(await db.collection('task_changes').findOne({card_id:card.id,state:'pending'},{session}))return 'pending_update';
       if(apply) {
         await db.collection('tasks').insertOne(row,{session});
-        await db.collection('proposals').updateOne({_id:thread,ack:binding.ack},{$set:{legacy_ack:binding.ack,ack:JSON.stringify({thread_id:thread,task_id:card.id,task_url:url})}},{session});
+        const fields={legacy_ack:current.ack,ack:JSON.stringify({thread_id:thread,task_id:card.id,task_url:url})};
+        const skippedForImport=current.notification_status==='skipped' && current.notification_error==='legacy_task_not_imported';
+        if(current.notification_status==='pending' || skippedForImport) {
+          Object.assign(fields,{notification_status:'pending',notification_error:null,notification_attempts:0,next_attempt_at:0});
+        }
+        await db.collection('proposals').updateOne({_id:thread,ack:current.ack},{$set:fields},{session});
       }
       return apply?'imported':'eligible';
     });
